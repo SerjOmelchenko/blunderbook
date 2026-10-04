@@ -1,0 +1,17 @@
+{
+  "screens": 28,
+  "states": 130,
+  "routes": 660,
+  "overflows": [],
+  "errors": [],
+  "checks": [
+    "Every screen/state renders nonempty content and all declared destinations exist",
+    "Screen search filters the inventory",
+    "Onboarding validation, profile confirmation and import navigation",
+    "Review to hypothetical continuation and next legal position",
+    "All screen/state layouts checked for horizontal overflow at 390px",
+    "All default layouts checked at 320px",
+    "Gallery contains all 28 screens"
+  ],
+  "passed": true
+}

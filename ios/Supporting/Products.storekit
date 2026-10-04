@@ -1,0 +1,54 @@
+{
+  "identifier": "30ACD5BE-6793-4A52-B621-F9BD16A11833",
+  "nonRenewingSubscriptions": [],
+  "products": [],
+  "settings": {
+    "_applicationInternalID": "",
+    "_developerTeamID": "",
+    "_failTransactionsEnabled": false,
+    "_locale": "en_US",
+    "_storefront": "USA",
+    "_storeKitErrors": []
+  },
+  "subscriptionGroups": [
+    {
+      "id": "21500001",
+      "localizations": [
+        {
+          "custom": "",
+          "description": "",
+          "displayName": "Premium Subscription",
+          "locale": "en_US"
+        }
+      ],
+      "name": "Premium Subscription",
+      "subscriptions": [
+        {
+          "adHocOffers": [],
+          "codeOffers": [],
+          "displayPrice": "4.99",
+          "familyShareable": false,
+          "groupNumber": 1,
+          "internalID": "6813404870",
+          "introductoryOffer": null,
+          "localizations": [
+            {
+              "description": "Unlimited analyses and unlimited tracked players.",
+              "displayName": "Premium monthly",
+              "locale": "en_US"
+            }
+          ],
+          "productID": "monthly_premium",
+          "recurringSubscriptionPeriod": "P1M",
+          "referenceName": "monthly_premium",
+          "subscriptionGroupID": "21500001",
+          "type": "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version": {
+    "major": 3,
+    "minor": 0
+  }
+}

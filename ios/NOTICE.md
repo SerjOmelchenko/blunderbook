@@ -1,6 +1,6 @@
 # Third-party components and build manifest
 
-Chess Analyser as a whole is distributed under the GNU General Public License version 3 or
+Blunderbook as a whole is distributed under the GNU General Public License version 3 or
 later. See [LICENSE](LICENSE) for the full text.
 
 ## Stockfish
@@ -12,34 +12,34 @@ all — is GPLv3 rather than only the vendored directory.
 | | |
 |---|---|
 | Component | Stockfish |
-| Version | Stockfish 18 (tag `sf_18`) |
-| Source commit | `cb3d4ee9b47d0c5aae855b12379378ea1439675c` |
+| Version | Stockfish 19 (tag `sf_19`, released 2026-09-05; replaced Stockfish 18 on 2026-10-10) |
+| Source commit | `edb0d9db6731067ec50ce619ff372b463bc4dd5d` |
 | Upstream | https://github.com/official-stockfish/Stockfish |
 | Licence | GNU General Public License v3 or later |
 | Copyright | 2004–2026 The Stockfish developers (see `Vendor/Stockfish/AUTHORS`) |
 | Location in this repository | `Vendor/Stockfish/` |
-| Modified? | **Yes, one file.** `src/main.cpp` and `src/Makefile` are omitted, because an app target supplies its own entry point and build system. `src/shm.h` is modified (2026-10-04, marked in the file): Apple platforms have no shared-memory backend, so Stockfish's fallback gave every `Engine` its own copy of the networks. The app runs several engines at once, so the fallback now shares one read-only copy between engines in the same process, keyed by the network's content hash. Search results are unchanged; with the app's 64 MiB hash, each extra engine costs about 97 MB instead of about 229 MB. No other Stockfish source file has been edited. |
+| Modified? | **Yes, one file.** `src/main.cpp`, `src/Makefile` and `src/universal/` (multi-architecture launchers for desktop builds) are omitted, because an app target supplies its own entry point and build system. `src/shm.h` is modified, marked in the file, in two places. (1) 2026-10-10: Stockfish 19's system-wide POSIX shared-memory backend is turned off on iOS, where the app sandbox has no `/tmp` or `shm_open`. (2) 2026-10-04: without such a backend, Stockfish's fallback gives every `Engine` its own copy of the network. The app runs several engines at once, so the fallback now shares one read-only copy between engines in the same process, keyed by the network's content hash. Search results are unchanged. No other Stockfish source file has been edited. |
 
 Stockfish's own licence text is kept alongside its sources at `Vendor/Stockfish/Copying.txt`, and
 its author list at `Vendor/Stockfish/AUTHORS`.
 
 ## Neural networks
 
-Stockfish evaluates positions with NNUE networks, which are also GPLv3. Stockfish names each
+Stockfish evaluates positions with an NNUE network, which is also GPLv3. Stockfish 19 uses one
+network where 18 used a big and a small one. Stockfish names each
 network after its own SHA-256 prefix, so the filename is the checksum.
 
 | Network | SHA-256 | Size |
 |---|---|---|
-| `nn-c288c895ea92.nnue` (big) | `c288c895ea924429ea9092e3f36b2b3c1f00f2a3a4c759ff7e57e79e3b43e4a7` | 108,919,594 bytes |
-| `nn-37f18f62d772.nnue` (small) | `37f18f62d772f3107e1d6aaca3898c130c3c86f2ab63e6555fbbca20635a899d` | 3,519,630 bytes |
+| `nn-1a298aa575a0.nnue` | `1a298aa575a085434d29027978dc36867fe9c5bcea9376654b7a8eba1e52dfc2` | 98,511,183 bytes |
 
-Both are bundled in the app for offline use, at `ChessAnalyser/Resources/Networks/`. Nothing is
+It is bundled in the app for offline use, at `Blunderbook/Resources/Networks/`. Nothing is
 downloaded at runtime.
 
 Verify them with:
 
 ```sh
-shasum -a 256 ChessAnalyser/Resources/Networks/*.nnue
+shasum -a 256 Blunderbook/Resources/Networks/*.nnue
 ```
 
 ## Build configuration
@@ -65,11 +65,25 @@ which is what the "or later" clause exists for.
 | Artist | Colin M.L. Burnett |
 | Upstream | https://github.com/lichess-org/lila/tree/master/public/piece/cburnett |
 | Licence | GNU General Public License v2 or later |
-| Location in this repository | `ChessAnalyser/Assets.xcassets/piece-*.imageset/` |
+| Location in this repository | `Blunderbook/Assets.xcassets/piece-*.imageset/` |
 | Modified? | **No.** The twelve SVGs are included verbatim. Each is wrapped in an asset-catalogue `Contents.json` so Xcode preserves the vector data, which does not alter the artwork. |
 
 Only the pieces are third-party. The board, its squares, coordinates, highlights and move arrows
 are drawn by the app in `BoardView.swift`.
+
+## Opening names
+
+Opening names and the book of known opening moves come from the Lichess **chess-openings** data
+set, a list of about 3,900 named lines with their ECO codes.
+
+| | |
+|---|---|
+| Component | lichess-org/chess-openings (`a.tsv` to `e.tsv`) |
+| Upstream | https://github.com/lichess-org/chess-openings |
+| Licence | Public domain; CC0 1.0 where copyright applies |
+| Retrieved | 2026-10-08, `master` branch |
+| Location in this repository | `Blunderbook/Resources/Openings.tsv` |
+| Modified? | **No.** The five files are joined into one, with a single header row. |
 
 ## Everything else
 

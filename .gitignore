@@ -3,3 +3,6 @@ xcuserdata/
 *.xcuserstate
 DerivedData/
 build/
+
+# Stockfish NNUE networks are fetched separately (see ios/README.md)
+*.nnue

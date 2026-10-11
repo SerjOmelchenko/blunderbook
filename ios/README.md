@@ -1,8 +1,8 @@
-# Chess Analyser — iOS app (v1)
+# Blunderbook — iOS app (v1)
 
 A working implementation of the [development specification](../chess-ios-app-spec.md): an iPhone app
-that downloads any public Chess.com player's completed games, analyses them on the device with
-Stockfish 18, and shows each mistake together with the line that demonstrates it.
+that downloads any public Chess.com or Lichess player's completed games, analyses them on the device with
+Stockfish 19, and shows how every move moved the evaluation bar.
 
 Nothing in the repository root was modified; this folder is self-contained.
 
@@ -12,17 +12,25 @@ Nothing in the repository root was modified; this folder is self-contained.
 ## Build and run
 
 ```sh
-open ios/ChessAnalyser.xcodeproj
+open ios/Blunderbook.xcodeproj
 ```
 
-Select the **ChessAnalyser** scheme and an iPhone simulator (or your device), then run. Requires
+Select the **Blunderbook** scheme and an iPhone simulator (or your device), then run. Requires
 Xcode 16 or newer; it was built and tested with Xcode 27 against the iOS 27 SDK, with a deployment
 target of iOS 17.0.
 
 There are no package dependencies and no CocoaPods. Stockfish is vendored as source under
-`Vendor/Stockfish/` and compiled by the app target; its two NNUE networks are checked in under
-`ChessAnalyser/Resources/Networks/` and bundled for offline use. That's **~112 MB of the repo and
-of the app download** — see "Size" below.
+`Vendor/Stockfish/` and compiled by the app target. Its NNUE network is bundled for offline use
+but **not checked in** (it is 94 MB, too close to GitHub's 100 MB file limit). Fetch it once
+before the first build:
+
+```sh
+curl -fL -o Blunderbook/Resources/Networks/nn-1a298aa575a0.nnue \
+  https://tests.stockfishchess.org/api/nn/nn-1a298aa575a0.nnue
+shasum -a 256 Blunderbook/Resources/Networks/nn-1a298aa575a0.nnue   # must start 1a298aa575a0
+```
+
+See "Size" below for what it costs the app download.
 
 The bundle identifier is `com.example.chessanalyser` and the team is `78873P6WBY`. To build
 under a different account, change both under *Signing & Capabilities*.
@@ -30,12 +38,12 @@ under a different account, change both under *Signing & Capabilities*.
 Tests:
 
 ```sh
-xcodebuild test -project ios/ChessAnalyser.xcodeproj -scheme ChessAnalyser \
+xcodebuild test -project ios/Blunderbook.xcodeproj -scheme Blunderbook \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
 
-115 tests, about 100 seconds. Most are instant; the analysis tests drive real Stockfish at the
-real 100k/500k node budgets, on more than one engine, which is the point of them.
+114 tests, about 45 seconds. Most are instant; the analysis tests drive real Stockfish at the
+real 100k node budget, on more than one engine, which is the point of them.
 
 ### Trying it without waiting for a download
 
@@ -45,53 +53,49 @@ xcrun simctl launch booted com.example.chessanalyser -seed-demo
 
 `-seed-demo` loads ten real games for a fictional `demoplayer` and queues five of them for
 analysis. It is `#if DEBUG` only and does nothing without the argument. `-start-tab games`,
-`-open-game demo-0`, `-open-route queue` and `-open-sheet paywall` jump straight to a screen.
+`-open-game demo-0`, `-open-route queue` and `-open-sheet paywall` jump straight to a screen. `-seed-provider lichess`
+makes the demo player a Lichess one.
 
-For the ordinary path, just run the app and add a real Chess.com username.
+For the ordinary path, just run the app and add a real Chess.com or Lichess username.
 
 ## What works end to end
 
-Add a player → their monthly archives download → games appear → analyse one game or queue them all →
-a saved review with an evaluation graph, per-move severities, evidence lines and a steppable
-continuation → aggregate statistics and mistake categories → export and re-import everything.
+Add a player → their monthly archives download → games appear → analyse one game, deep-review it, or queue the previous 100 →
+a saved review with an evaluation graph, each move's effect on the evaluation bar, and Stockfish's
+three live lines for any position → results and rating statistics → export and re-import everything.
 
 | Area | State |
 |---|---|
 | Chess rules | Complete. Passes perft to depth 5 on six standard positions, full SAN in and out, PGN with comments, variations, NAGs and `SetUp`/`FEN`. |
-| Engine | Stockfish 18, vendored and compiled in-process. The only source of analysis. |
-| Analysis policy | `standard-v1` exactly as specified: 100k nodes per root, 500k confirmation pair, 5/10/20 severity cut-offs, arithmetic-mean game accuracy. |
-| Detectors | Undefended piece, allowed and missed fork, allowed absolute pin, allowed mate, missed forced mate, material consequence, lost winning advantage. Every tag is backed by a line that resolves. |
-| Persistence | SQLite via `sqlite3` behind typed repositories, WAL, foreign keys, versioned transactional migrations, 50-row paging, per-game summary tables. |
-| Provider | Chess.com Published-Data API with conditional requests, `Retry-After`, jittered backoff, and classified failures. |
-| Free plan | Analyse any single game, free and unlimited. "Analyse all games" is Premium. 3 tracked players. Every plan downloads and shows the whole history. |
-| Queue | Durable, deduplicated, per-ply checkpoints, manual preemption, composing blocker set (user, thermal, battery, Low Power Mode, entitlement, storage). |
+| Engine | Stockfish 19, vendored and compiled in-process. The only source of analysis. |
+| Analysis policy | `eval-v1`: Stockfish searches every position once at 100k nodes; its evaluation and line are stored as given. No move labels, accuracy or pattern tags. A deep review (`deep-v1`, on request, one game) adds them back for that game: 100k nodes per position, confirmations at the review depth set in Settings (500k / 2M default / 5M / 10M nodes), severity, phase, patterns, best move and accuracy. |
+| Persistence | SQLite via `sqlite3` behind typed repositories, WAL, foreign keys, versioned transactional migrations, 50-row paging. |
+| Provider | Chess.com Published-Data API with conditional requests, and the Lichess game export streamed as ND-JSON with resumable cursors. Both share one transport: `Retry-After`, jittered backoff, and classified failures. Each player belongs to one site; the same name on both is two players. |
+| Free plan | Analyse any single game, free and unlimited. Deep review is free too. "Analyse previous 100 games" is Premium. 3 tracked players. Every plan downloads and shows the whole history. |
+| Queue | Durable, deduplicated, several engines at once, manual preemption, composing blocker set (user, thermal, battery, Low Power Mode, entitlement, storage). |
 | Billing | StoreKit 2 against the real product `monthly_premium` (group "Premium Subscription", 1 month, Family Sharing off). Verified entitlements, updates listener, restore, cached valid-through for offline. Premium unlocks bulk analysis and unlimited players. |
 | Backup | Versioned `.chessbackup` (stored ZIP + manifest + NDJSON), staged validation before any write, merge-only atomic commit. |
 | UI | All 28 screens from the inventory, light and dark, Dynamic Type, VoiceOver labels, chart data alternatives, 44pt targets. |
 
 ## The engine
 
-**Stockfish 18** (tag `sf_18`, commit `cb3d4ee9b47d`), vendored as source and compiled into the app
+**Stockfish 19** (tag `sf_19`, commit `edb0d9db6731`; Stockfish 18 until 2026-10-10), vendored as source and compiled into the app
 by the app target. There is no child process: the bridge drives `Stockfish::Engine` directly
 through its C++ API, which is what §2 asks for.
 
 | | |
 |---|---|
-| Search | `go nodes N` — 100,000 per root, 500,000 for a confirmation pair (policy `standard-v2`) |
+| Search | `go nodes 100000`, once per position (policy `eval-v1`); a deeper three-line search runs live when a position is shown |
 | Settings | Threads 1, Hash 64 MiB per engine, MultiPV 1, full strength, no ponder, Chess960 off |
-| Engines | One on a performance core, plus one per efficiency core (up to four; fewer below 6 GB of memory), sharing one copy of the networks |
-| Networks | `nn-c288c895ea92` (big, 104 MB) and `nn-37f18f62d772` (small, 3 MB), bundled |
-| Speed | 1.1–1.4M nodes/s on an iPhone 16 Pro performance core, 250–300k per efficiency core, measured |
+| Engines | One on a performance core, plus one per efficiency core (up to four; fewer below 6 GB of memory), sharing one copy of the network |
+| Network | `nn-1a298aa575a0` (94 MB), bundled. Stockfish 19 has one network where 18 had two |
+| Speed | 1.1–1.4M nodes/s on an iPhone 16 Pro performance core, 250–300k per efficiency core, measured with Stockfish 18 |
 
 Two details in `StockfishBridge.mm` matter more than they look:
 
 - **The hash is cleared before every root search.** Without it, results depend on what was
   searched before. §5 asks for independent roots; this is what makes the app's numbers
   reproducible, and what lets any of several engines analyse any game with the same result.
-  Keeping one game's hash and searching its positions last-first was tested against 4M-node
-  searches of 48 real games: it matched at 17% fewer nodes and lost measurably below 70%, too
-  little to replace every saved review with a new policy. `AnalysisPolicy.keepsEngineMemory`
-  switches it on.
 - **Positions are sent as a start FEN plus the full move list**, never a bare FEN, so the engine
   sees repetitions and the halfmove clock (§5: "FEN alone is not an adequate cache key").
 
@@ -103,19 +107,19 @@ policy's statistics and quietly become incomparable.
 `ChessEngine` remains the seam a different engine would be dropped into, and `GameAnalyzer` depends
 on the protocol rather than the implementation, but only `StockfishEngine` implements it.
 
-Changing engine changes output, so the policy identifier is **`standard-v2`**. Reviews saved under
-`standard-v1` stay readable and drop out of current aggregates until reanalysed, exactly as §5
-requires.
+The policy identifier is **`eval-v1`**. Reviews saved under earlier policies (`standard-v1`,
+`standard-v2`) hold Stockfish evaluations of the same positions, searched at least as deep, so they
+are shown and counted as they are; a new analysis of the game replaces them.
 
 ## The free plan
 
 | | Free | Premium |
 |---|---|---|
 | Analyse a game you open | Yes, unlimited | Yes |
-| Analyse all games at once | — | Yes |
+| Analyse 100 games at once | — | Yes |
 | Tracked players | 3 | Unlimited |
 | History downloaded and shown | All of it | All of it |
-| Saved reviews | Kept for good | Same |
+| Analysed games | Kept for good | Same |
 
 There are no credits or counters. Premium gates *starting* a bulk run; work already queued
 finishes even if the subscription lapses meanwhile, and saved reviews are always readable.
@@ -151,21 +155,20 @@ registered app.
 
 | | |
 |---|---|
-| App bundle | ~117 MB, almost all of it the big NNUE network |
-| Repository | ~112 MB of checked-in networks |
-| Memory while analysing | ~380 MB with one engine, ~100 MB per further engine (one shared copy of the networks); about 0.9 GB with all five |
+| App bundle | ~103 MB, almost all of it the NNUE network |
+| Repository | None — the network is fetched separately (see "Build and run") and ignored by git |
+| Memory while analysing | ~380 MB with one engine, ~100 MB per further engine (one shared copy of the network); about 0.9 GB with all five, measured with Stockfish 18 |
 
-That is the real cost of Stockfish 18. If it is too much, the options are: ship only the small net
-(weaker, and Stockfish wants both), or fetch the big net with On-Demand Resources on first launch
-(which breaks "bundle nets for offline use" in §2).
+That is the real cost of Stockfish. If it is too much, the option is to fetch the network with
+On-Demand Resources on first launch, which breaks "bundle nets for offline use" in §2.
 
 ## Layout
 
 ```
 Vendor/
-  Stockfish/    Stockfish 18 sources with its AUTHORS and Copying.txt; one patch in src/shm.h (NOTICE.md)
+  Stockfish/    Stockfish 19 sources with its AUTHORS and Copying.txt; one patch in src/shm.h (NOTICE.md)
 
-ChessAnalyser/
+Blunderbook/
   App/          AppModel (the only place services are wired), RootView, debug fixtures
   Core/Chess/   Board, move generation, make/unmake, SAN, PGN, Zobrist
   Core/Domain/  Players, games, analyses, queue, filters, identity
@@ -173,7 +176,7 @@ ChessAnalyser/
   Resources/    Bundled NNUE networks and the GPLv3 text shown in the app
   Analysis/     Policy and scoring, detectors, per-game analyzer, worker and coordinator
   Data/         SQLite wrapper, schema, repositories, statistics
-  Network/      Chess.com client, archive sync
+  Network/      Chess.com and Lichess clients, shared transport, sync
   Entitlement/  StoreKit 2
   Backup/       Stored-ZIP reader/writer, export, staged import
   UI/           Design tokens, components, board, screens
@@ -185,16 +188,17 @@ builds SQL and never talks to the engine.
 ## Screens
 
 Every ID in [docs/screens.md](../docs/screens.md) has an implemented destination, except two
-removed by design: W06 Opening detail (Analytics no longer lists openings) and W10 Continuation
-(the review shows Stockfish's top three live lines under the board instead).
+removed by design: W06 Opening detail (Analytics no longer lists openings), W10 Continuation (the
+review shows Stockfish's top three live lines under the board instead), W13 Mistake category (W12
+is one flat list with kind labels and an in-place filter since 2026-10-10). W12 Mistakes reads deep
+reviews only.
 
 | | | |
 |---|---|---|
 | W01 Welcome | W02 Add player | W03 Importing history |
 | W04 Tracked players | W05 Analytics | W07 Games |
 | W08 Filters | W09 Game review | W11 Individual analysis (inline on W09) |
-| W12 Mistakes | | |
-| W13 Mistake category | W14 Bulk preparation | W15 Queue |
+| W14 Bulk preparation | W15 Queue | |
 | W16 Premium plan | W17 Subscription | W18 Settings |
 | W19 Backup & restore | W20 Export | W21 Import preview |
 | W22 Import result | W23 Storage & data | W24 Confirmations |
@@ -212,8 +216,8 @@ review screen, with a last-move highlight, check ring, evidence rings and a tran
 the engine's preference. While analysis runs, the queue shows as an accessory above the tab bar on
 iOS 26.1+, and as a toolbar button before that.
 
-Severity is always carried by text as well as colour, charts have a data-table alternative, and
-every tappable target is at least 44pt.
+Whether a move improved or declined the bar is always carried by an arrow and text as well as
+colour, charts have a data-table alternative, and every tappable target is at least 44pt.
 
 ## Deliberate choices worth knowing
 
@@ -230,8 +234,8 @@ every tappable target is at least 44pt.
   returns after 20 calm minutes. A review you open yourself always runs on the performance core
   and takes it from bulk work.
 - **Analysis speed is budget-bound, not time-bound**, so the same game scores identically on any
-  device and on any of its engines. A 40-move game costs 81 root searches at 100k nodes plus about
-  0.35 confirmation searches at 500k per ply — about 250k nodes per ply in club games.
+  device and on any of its engines. A 40-move game costs 81 searches at 100k nodes: about 8M nodes,
+  some 7 s on a performance core or 27 s on one efficiency core.
 - **An interrupted game starts over and reproduces an uninterrupted one exactly.** Nothing is
   saved until a game is complete, which at these budgets takes seconds. The tests stop games part
   way at several points, analyse them on different engines after other games, and compare every

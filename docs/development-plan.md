@@ -23,7 +23,7 @@ Exit: fixtures containing 1,001 eligible games, duplicates, unsupported games an
 
 ## 3. Single-game review
 
-- Implement standard-v1 loss/accuracy, confirmation searches, phases and mate/terminal handling; analyze both colors but aggregate only the selected player's moves.
+- Implement loss, per-move accuracy and game accuracy (one method for every provider, spec §5 Accuracy), confirmation searches, phases and mate/terminal handling; analyze both colors but aggregate only the selected player's moves.
 - Build W09–W11 and W26. Board navigation supports actual moves, eval selection, orientation, error navigation and separate hypothetical continuation.
 - Add evidence-based detectors independently, one at a time, with negative tests. An absent pattern never blocks a review.
 - Checkpoint every completed ply. Replace an older complete analysis only when the new version commits successfully.

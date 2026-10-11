@@ -161,7 +161,8 @@ def main():
                 budgets[budget][field] += b.get(field, 0)
     print("\nWORK MIX")
     if plies:
-        print(f"  {plies} plies · {100 * confirmed / plies:.1f}% confirmed · {shared} confirmations shared")
+        extra = f" · {100 * confirmed / plies:.1f}% confirmed · {shared} confirmations shared" if confirmed else ""
+        print(f"  {plies} plies{extra}")
     for budget, b in sorted(budgets.items(), key=lambda item: int(item[0])):
         print(f"  {int(budget):>7} nodes: {b['searches']:.0f} searches, {hours(b['seconds'])} "
               f"({100 * b['seconds'] / search if search else 0:.0f}% of engine time)")

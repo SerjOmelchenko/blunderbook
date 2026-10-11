@@ -8,13 +8,13 @@ Companions: [screen/state inventory](docs/screens.md), [interactive wireframes](
 
 ## 1. Product scope
 
-An iPhone app that downloads any public Chess.com player's completed games, analyzes them locally using Stockfish, and shows mistakes with supporting board continuations. Three tabs: **Analytics, Games, Mistakes**. Player selection and Settings are shared destinations.
+An iPhone app that downloads any public Chess.com player's completed games, analyzes them locally using Stockfish, and shows how each move moved the evaluation bar, with Stockfish's live lines for any position. Any game can also get a deep review on request, which labels its mistakes. Three tabs: **Analytics, Games, Mistakes**. Player selection and Settings are shared destinations.
 
 - Anyone can track any public player. No ownership verification, Chess.com login, app account, or Sign in with Apple. No artificial tracked-player count limit in v1; each player has a separate free window.
 - Standard chess only: bullet, blitz, rapid, Daily. Include rated/unrated completed games regardless of length or recorded ending. A three-move game counts and is analyzed normally. Never infer disconnection, intent or psychological cause.
 - Exclude ongoing games, variants, Puzzle Rush and data unavailable from the public API. Chess960 exclusion is a product choice, not a Stockfish limitation.
 - On-device computation and storage, resumable queues, retained reviews and manual backup. No automatic cross-device sync or custom backend.
-- Four mistake fields: severity, phase, optional pattern, supported consequence. Show mistakes and better continuations directly. No retry, puzzles, playing against the engine, LLM/chat, or “Brilliant” labels.
+- Stockfish's evaluations as given: no move labels, accuracy or pattern tags in the standard analysis (§5). A deep review of one game, on request, adds them (§5, Deep review). No retry, puzzles, playing against the engine, LLM/chat, or “Brilliant” labels.
 - One standard quality profile. No Quick/Deep setting or claim of exact Chess.com/Lichess score equivalence, player-strength prediction or cheat detection.
 - Entire combined application under GPLv3, including UI, engine wrapper and tagging logic. Subscription rules are in §3; release considerations in §14.
 
@@ -26,7 +26,7 @@ An iPhone app that downloads any public Chess.com player's completed games, anal
 | UI | SwiftUI, NavigationStack, native sheets, Swift Charts; portrait/landscape, Dynamic Type, VoiceOver, light/dark, Reduce Motion. |
 | Persistence | System SQLite via sqlite3 behind typed repositories; WAL, foreign keys, transactional migrations and indexed/paged queries. No CloudKit. |
 | Networking | URLSession, one serial provider scheduler, conditional requests, cancellation and retry/backoff. |
-| Engine | Stockfish 18 tag `sf_18`; lock exact source commit and required NNUE checksums in the build manifest. Native C++ with Objective-C++/Swift bridge; no child process. |
+| Engine | Stockfish 19 tag `sf_19` (was 18 until 2026-10-10); lock exact source commit and required NNUE checksums in the build manifest. Native C++ with Objective-C++/Swift bridge; no child process. |
 | Concurrency | Single engine worker off the main thread; actors/serialized boundaries for engine, repository and queue ownership. |
 | Payments | StoreKit 2 verified transactions and entitlement updates; no account/entitlement backend. |
 | Backup | Versioned ZIP with JSON manifest and streamed NDJSON records; no executable content. |
@@ -37,20 +37,21 @@ Use a tested GPL-compatible chess-rules implementation supporting castling, en p
 
 ## 3. Plans and eligibility
 
-| Capability | Free | Active subscription |
+| Capability | Free | Active subscription (incl. free trial) |
 |---|---|---|
-| Tracked public players | Multiple | Multiple |
-| New individual analysis / reanalysis | Latest 1,000 eligible completed games per player | All available eligible completed games |
-| Analyze all games | Opens plan screen | Available, no game-count cap |
-| Aggregate statistics | Current 1,000-game window, then filters | Full downloaded eligible history, then filters |
+| Tracked public players | 1 (a Chess.com and a Lichess account count as two) | Unlimited |
+| Analyse a game you open | Yes | Yes |
+| Review depth (deep-v1 confirmation budget) | Depth 19 and 23 | Also depth 26 and 29 |
+| Mistakes tab (W12) and drills (W14) | Locked: tab shows a lock; tapping opens a preview with sample games (W12a) | Yes |
+| Analyze previous 100 games | Opens plan screen | The 100 most recent games without a deep review, each deep-reviewed (deep-v1); run again to go further back |
 | View saved reviews, including older games | Yes | Yes |
 | Export/import | Yes | Yes |
 
-One monthly auto-renewing product, target US price approximately $5/month, no introductory trial in v1, Family Sharing disabled. Production UI uses StoreKit's localized price/period. Select the available price point during product setup; do not hard-code `$5`.
+One monthly auto-renewing product, target US price approximately $5/month (configured as $4.99), covering every Premium feature. Its introductory offer is a 7-day free trial, once per Apple Account per subscription group; eligibility comes from StoreKit (`isEligibleForIntroOffer`), and the paywall shows "Start 7-day free trial" with the price after it only while eligible. Family Sharing disabled. Production UI uses StoreKit's localized price, period and trial length; do not hard-code `$5` or `7 days`.
 
-Window: deduplicate eligible games, order by `(endTime DESC, gameKey DESC)`, take 1,000 **across all four time classes combined** for each player. Apply date/class/color/rated/opening filters afterward; filters cannot expand eligibility or create a separate allowance. Unsupported games do not consume slots. Short and zero-move completed games do.
+Downgrades never delete anything: players tracked beyond the free limit are kept and stay selectable (only adding is blocked); a chosen Premium depth stays saved but new reviews run at depth 23 until Premium returns; saved reviews and solved marks are kept while the Mistakes tab is locked. Before StoreKit answers at launch, a subscription verified earlier and still inside its valid-through date keeps locked screens open, so a subscriber never sees a lock flash.
 
-When game 1,001 arrives, game 1 leaves free aggregates and new/reanalysis eligibility. Keep its data and review. Games has **Eligible games / Saved reviews** segments; older saved reviews carry “Outside your free window.” Opening them never changes aggregate scope. One Apple purchase unlocks all locally tracked players, not a particular Chess.com account.
+Every plan covers the whole downloaded history; there is no free game window. One Apple purchase unlocks all locally tracked players, not a particular Chess.com account.
 
 When entitlement expires, pause bulk at the next safe stop/checkpoint, retain results and pending work, recalculate free aggregate scope. Renewal removes the entitlement pause; continuation requires no manual pause and no other blocking reason. Individual reviews remain allowed in the free window. Restoring purchases restores premium access, not profiles, games, reviews or queue progress.
 
@@ -72,70 +73,94 @@ The provider has username-addressed profiles and monthly archives, not a guarant
 
 Use a descriptive User-Agent, serial requests, `ETag`/`Last-Modified`, `Cache-Control` and `Retry-After`. On 429, pause requests and show the rate-limit state. Retry network/5xx failures with jittered 2, 4, 8, 16, 32-second backoff, then stop that refresh. Manual Retry begins a new attempt. [Provider response guidance](https://support.chess.com/en/articles/9650547-what-is-the-pubapi-and-how-do-i-use-it).
 
-Distinguish player-not-found, unavailable archive, no eligible games, offline, rate limit and malformed PGN. Do not interpret a 404 as proof of privacy restrictions or prescribe an unverified privacy setting. Retain eligible malformed-game metadata, count the game, show analysis failure and allow retry after refresh. Zero-move games count but have no invented accuracy/mistakes.
+Distinguish player-not-found, unavailable archive, no eligible games, offline, rate limit and malformed PGN. Do not interpret a 404 as proof of privacy restrictions or prescribe an unverified privacy setting. Retain eligible malformed-game metadata, count the game, show analysis failure and allow retry after refresh. Zero-move games count but have no invented evaluations.
 
 Completion requires an archived game with end timestamp and result. Preserve raw result codes; normalize W/D/L from the player's recorded result. Unknown/inconsistent outcomes remain in game totals, appear as Unknown and are excluded from outcome percentages with a stated denominator. A resignation/timeout result is never substituted for an engine evaluation.
 
-## 5. Analysis policy: standard-v2
+## 5. Analysis policy: eval-v1
+
+Changed 2026-10-04: analysis stores Stockfish's own output and nothing derived from it. The
+severity labels, accuracy, phases, pattern tags, consequences and explanations of standard-v1/v2
+are removed, and so are the confirmation searches that existed to make those labels reliable.
+
+### Deep review (deep-v1)
+
+Added 2026-10-08: a game the person opens can be deep-reviewed on request, free on every plan. It
+runs the former standard-v2 method on that game: every position at 100,000 nodes, both positions
+around a candidate error (loss ≥ 5 points, mate appearing/disappearing, or improvement > 5)
+re-searched at the review depth chosen in Settings (500k, 2M — the default since 2026-10-10 — 5M or 10M
+nodes; a new choice applies to reviews run after it), then per move loss, accuracy, severity (5/10/20 thresholds), phase,
+evidence-based pattern tags, consequence, explanation and the engine's best move and line, plus each
+colour's game accuracy. Opening a game in the review starts its deep review automatically when it has none (updated 2026-10-08: there is no separate quick analysis of a single game). A deep review replaces a standard review of the game; a standard analysis
+never replaces a deep review. The Mistakes tab counts the tracked player's moves in deep reviews only.
+
+#### Accuracy (scoring winpct-2026)
+
+Changed 2026-10-11. One method scores every game, whichever site it came from: Chess.com and
+Lichess games are analysed and scored identically, by this app's own Stockfish, and the provider
+never enters scoring. Neither site's own accuracy is fetched, shown or calibrated against, and the
+app makes no claim to reproduce either site's number (§1). The method follows Lichess's published
+game-accuracy aggregation:
+
+- Win% of a position: `W(cp)` from the Evaluation bar section, in the mover's frame.
+- Move loss: `max(0, W_before − W_after)` for the side that moved (unchanged).
+- Move accuracy: 100 at zero loss, otherwise `clamp(103.1668 × exp(−0.04354 × loss) − 3.1669 + 1, 0, 100)`.
+  The +1 is Lichess's allowance for imperfect analysis.
+- Volatility weights: the positions are each move's stored before-evaluation plus the last
+  move's after-evaluation, as White's win%. Each move gets the population standard deviation of a
+  window of `clamp(plies / 10, 2, 8)` consecutive positions, clamped to 0.5–12. The first
+  `window − 2` moves reuse the opening window, then the window slides one position per move.
+- A colour's game accuracy is `(weighted mean + harmonic mean) / 2` of its move accuracies. The
+  weighted mean uses the volatility weights, and the harmonic mean counts each accuracy as at
+  least 1.
+
+Before this change the game accuracy was the plain mean of move accuracies. Most moves score
+95–100, so a few blunders barely moved it, and nearly every game landed at 85–95. On 13 real games
+the plain mean was 9 points higher on average (up to 20.5). Deep reviews scored by an older scoring
+version, restored backups included, are rescored on launch from their stored losses and
+evaluations. No search is repeated, and evaluations, losses and severities are unchanged.
+
+Updated 2026-10-10 (tagger detectors-2): a hanging piece is any non-pawn piece the opponent's
+forcing line wins with material still down once it resolves — taken by the first reply, or later
+when the exchange on its square wins — not only one with no defender. A missed capture is an
+engine capture whose forcing line wins material that the played move did not. Forks and pins are
+found anywhere in the forcing part of a line, not only on its first move. An error no pattern
+explains is labelled by its consequence (Lost material, Missed material, Let a win slip, No forcing
+line), so no error is "unknown". Deep reviews tagged by an older tagger are re-tagged on launch from
+their stored positions and lines; no search is repeated and evaluations, losses and severities are
+unchanged.
+
+Added 2026-10-08: openings and book moves come from the bundled Lichess chess-openings list (CC0,
+`Openings.tsv`). Positions are matched by Zobrist key without the en-passant file, so transpositions
+count. A move is book while every move so far reached a position on a listed line. The review shows
+the deepest opening name reached (ECO + name) above the evaluation line, and "Book" on book moves.
+A deep review gives a book move no inaccuracy or mistake label, but still labels a blunder, because
+the list names traps such as Fool's Mate. Book status is derived from the moves, not stored.
 
 ### Engine execution
 
-- Stockfish 18 + pinned NNUE, Threads=1, Hash=64 MiB per engine, MultiPV=1, full strength, ponder off, Chess960 off. Bundle nets for offline use. No downloaded engine code or evaluation service.
-- Supply full legal game history, preserving repetition and halfmove counters. Reset hash and histories before every root search, so each search depends only on its position, history and budget, and a game's result is identical on any engine instance. Analyze a game as one unit: every position, then the confirmations; publish nothing before it completes.
-- Evaluate before each move for the best line and after the recorded move for the opponent's best response. **100,000 nodes per root search**. Store achieved depth/nodes, best root move and up to 12 legal PV plies. Normalize stored scores to White; convert to mover perspective for scoring.
-- If played move equals the best root move, assign zero loss and reuse its line; independent-search variation must not manufacture a mistake. If initial loss reaches 5 points, a mate appears/disappears, or after-eval improves by >5 points, confirm both roots at **500,000 nodes each**; a position shared by two confirmed plies is searched once. Use that pair for the final classification. Tested and not adopted: keeping one game's hash and searching its positions last-first matched these labels and game accuracy at 100,000/350,000 nodes (17% fewer) against 4M-node searches of 48 real games, and lost measurably below about 70% of the nodes.
-- Use exact terminal scores for legal checkmate/stalemate/automatic draw; otherwise preserve engine mate distances. Never represent a win on time as checkmate. Keep pre-move and best-response lines separate from the actual game.
-- Stop on cancellation or interruption; an interrupted game is analyzed again from its first move. Never score a partial search. A 30-second engine-response watchdog (three minutes for efficiency-core searches, which the system may starve while the phone is busy) stops the search and restarts the game once; repeated failure marks the game failed and continues other work. Benchmark before release; budget or order changes require a new policy ID.
-- Analyze both colors for review. Player analytics use only that player's moves. Save a game's review when it completes; publish nothing before. Zero moves yields No moves to analyze. Do not skip book/forced moves or exclude short games.
+- Stockfish 19 + pinned NNUE, Threads=1, Hash=64 MiB per engine, MultiPV=1, full strength, ponder off, Chess960 off. Bundle nets for offline use. No downloaded engine code or evaluation service.
+- Supply full legal game history, preserving repetition and halfmove counters. Reset hash and histories before every search, so each search depends only on its position, history and budget, and a game's result is identical on any engine instance.
+- Search every position of the game once at **100,000 nodes**. Store, per move, the evaluation of the position before and after it (normalized to White), the engine's line from the position after it (up to 12 legal plies), and that search's depth and nodes. Analyze a game as one unit; publish nothing before it completes.
+- Use exact terminal scores for legal checkmate/stalemate/automatic draw; otherwise preserve engine mate distances. Never represent a win on time as checkmate.
+- Stop on cancellation or interruption; an interrupted game is analyzed again from its first move. Never store a partial search. A 30-second engine-response watchdog (three minutes for efficiency-core searches, which the system may starve while the phone is busy) stops the search and restarts the game once; repeated failure marks the game failed and continues other work. Budget changes require a new policy ID.
+- Zero moves yields No moves to analyze. Do not skip book/forced moves or exclude short games.
+- When a position is shown, search it live, deeper (400,000 nodes), for Stockfish's three best lines. These are shown, never stored.
 
-### Severity and accuracy
+### Evaluation bar
 
-From mover-perspective centipawns `cp`, use `W(cp) = 100 / (1 + exp(-0.00368208 × cp))`; bound cp to ±10,000 for numeric safety. This is a fixed evaluation-derived index, not a personalized probability. Winning mate maps to 100, losing mate to 0, drawn terminal position to 50. Original mate scores are retained for display.
+The bar shows White's share for an evaluation: `W(cp) = 100 / (1 + exp(-0.00368208 × cp))`, cp bounded to ±10,000; a winning mate fills the bar, a losing mate empties it. Each move shows how far it moved the bar towards the side that played it (`W_after − W_before`, sign flipped for Black): improved, declined, or level when under one bar point. This is computed on screen from the two stored evaluations, not stored.
 
-`loss = max(0, W_before − W_after)` in percentage points:
+### Policies and saved reviews
 
-| Loss | Label |
-|---|---|
-| <5 | No mistake label |
-| >=5 and <10 | Inaccuracy |
-| >=10 and <20 | Mistake |
-| >=20 | Blunder |
-
-These are app v1 thresholds. Best may annotate the root move the engine chose; a near-equal alternative is not necessarily Best. No Excellent/Good/Brilliant taxonomy in v1.
-
-Move accuracy is 100 for zero loss, otherwise `clamp(103.1668 × exp(-0.04354 × loss) − 3.1669, 0, 100)`. A color's game accuracy is the **arithmetic mean** of its move accuracies, displayed to one decimal; unavailable with zero moves. This is explicitly this app's aggregation, not Lichess's weighted/harmonic game score. Trends average completed game values within daily buckets and show sample counts. [Published formula reference](https://lichess.org/page/accuracy).
-
-Do not mix provider accuracy into app metrics. Persist engine, net, policy, scoring and tagger versions. After a policy change, keep historical saved reviews; current aggregates include only matching policy results, with excluded-old-version coverage and a reanalysis action. Replacement is atomic only after new analysis succeeds. Preserve the previous review on failure. Explain that already-decided positions can yield high accuracy.
-
-### Four fields
-
-| Field | Definition |
-|---|---|
-| Severity | One threshold label above; absent for non-errors. |
-| Phase | Before the played move: endgame when remaining material weights across both sides total <=8 (minor=1, rook=2, queen=4; exclude pawns/kings); otherwise opening in first 20 plies, then middlegame. Endgame remains endgame after promotion. |
-| Pattern | Zero or more supported tags with evidence plies/squares. No inference about player thoughts. |
-| Consequence | Supported material loss/missed gain, allows mate/misses forced mate, lost winning advantage; otherwise generic evaluation loss. |
-
-Initial detector scope:
-
-- **Undefended piece:** opponent best line legally captures an undefended non-pawn piece and material remains down after forcing captures resolve. Exclude compensating sequences/sound sacrifices; omit when ambiguous.
-- **Allowed / missed fork:** a relevant continuation attacks two or more non-pawn opponent pieces (king included) and demonstrates material gain or mate. Geometry alone is insufficient. Allowed uses the response after the played move; missed uses the unplayed best line.
-- **Allowed absolute pin:** a slider pins a piece to its king and the continuation demonstrates consequent loss/mate. General relative-pin interpretation is out of scope.
-- **Allowed mate / missed forced mate:** confirmed roots establish new losing mate, or lost availability of winning mate. Choosing a slower still-forced mate is not a miss. A missed mate may be a detail tag without error severity when winning chances are preserved; count it as an error only if severity qualifies.
-- **Material consequence:** pawn=1, knight/bishop=3, rook=5, queen=9. Follow forcing checks/captures/promotions to a quiet endpoint within 12 plies. If the line does not resolve or compensation is unclear, omit the specific material claim.
-- **Lost winning advantage:** confirmed W_before>=80 and W_after<60 when no more specific proven consequence exists. Other errors say Reduces the position evaluation.
-
-Templates state what the line demonstrates, e.g. “After …Qh4, Black delivers checkmate.” Always allow inspection of the supporting continuation. An opportunity still counts if the actual opponent missed it. A motif must explain the deterioration/missed alternative, not simply occur elsewhere on the board. If unclassified, show evaluation and line without fabricating a tactical cause. Detectors require positive and negative regression fixtures.
+Persist engine, net and policy versions. Any complete review counts, whatever its policy: earlier policies stored evaluations of the same positions, searched at least as deep. A new complete analysis of a game replaces every earlier review of it, atomically; a failed attempt leaves the previous review in place.
 
 ## 6. Analytics
 
 - Shared context: selected player, one time class, date range, color and rated filters, plan scope. Default Rapid, all dates/colors, rated+unrated. Preserve selection; if no Rapid games select most-played live class, then Daily. No combined rating series; Daily is always separate.
-- Game totals/outcomes/openings use eligible metadata within plan scope. Ratings use rated games only, ordered by completion time. A profile's current rating may be separate but must not be inserted into a filtered historical chart without a matching date.
-- Group openings by PGN ECO/provider opening metadata; missing metadata is Unknown opening. Sort by count then name. Do not guess an opening from an arbitrary URL slug. Opening detail drills into matching games.
-- Accuracy/error metrics use fully completed current-policy analyses. Show coverage for the **same** player/filter/scope: e.g. 83 of 1,000 analyzed, with failed/incomplete/older-policy counts when applicable. No analysis means empty charts, not zero accuracy.
-- **Errors** means inaccuracies + mistakes + blunders; count a move once. **Mistake** severity is one subset. Labels must make the distinction clear.
-- Rate = `100 × qualifying error moves / analyzed moves by the tracked player`, over the selected sample. Never average per-game rates. Count a tag once per move per category; overlapping category totals may exceed unique errors and must be labeled. Phase denominators contain only player moves in that phase.
-- Unknown pattern is a valid category. Unknown outcomes are omitted only from W/D/L percentages; zero-move games only from accuracy/move denominators; incomplete/failed analyses only from computed metrics. All remain in game/coverage totals. No short-game exclusion or termination-based score adjustment.
+- Game totals and outcomes use eligible metadata within plan scope. Ratings use rated games only, ordered by completion time. A profile's current rating may be separate but must not be inserted into a filtered historical chart without a matching date.
+- Coverage is shown for the **same** player/filter/scope: e.g. 83 of 1,000 analyzed, with failed and in-progress counts when applicable.
+- Unknown outcomes are omitted only from W/D/L percentages; they remain in game totals. No short-game exclusion or termination-based score adjustment.
 
 ## 7. Queue and device behavior
 
@@ -173,13 +198,11 @@ First launch with no player opens Welcome. Otherwise restore selected player/tab
 | W04 | Tracked players | Switch; add; update username; remove |
 | W05 | Analytics | Class/filter; openings; games; queue; settings |
 | W06 | Opening detail | Matching games and reviews |
-| W07 | Games | Eligible / Saved reviews; filter; review; analyze all; queue |
+| W07 | Games | Eligible / Saved reviews; filter; review; analyze previous 100; queue |
 | W08 | Filters | Class/date/color/rated/status; apply/reset/cancel |
 | W09 | Game review | Select move/graph; next/previous error; flip; continuation |
 | W10 | Continuation | Actual / Better line; step ply; return |
 | W11 | Individual analysis | Progress; stop; completed review; retry |
-| W12 | Mistakes | Severity/phase/pattern; count/rate; category |
-| W13 | Mistake category | Occurrences; exact game/ply |
 | W14 | Bulk preparation | Estimate; start; dismiss; upgrade |
 | W15 | Queue | Pause/resume/cancel; retry failed; completed reviews |
 | W16 | Premium plan | Subscribe; restore; legal links; dismiss |
@@ -196,7 +219,7 @@ First launch with no player opens Welcome. Otherwise restore selected player/tab
 | W27 | Update username | Resolve; ID check; relink/mismatch |
 | W28 | System handoff | Document native purchase/manage/share/file-picker behavior |
 
-[Screen inventory](docs/screens.md) defines all required states and transitions. Native handoffs are explanatory wireframes, not replicas of Apple's UI. Root filters are shared across Analytics/Games/Mistakes; list-specific review status remains local. Saved reviews can include older games but always carry that scope label.
+[Screen inventory](docs/screens.md) defines all required states and transitions. Native handoffs are explanatory wireframes, not replicas of Apple's UI. Root filters are shared across Analytics/Games; list-specific review status remains local. Saved reviews can include older games but always carry that scope label.
 
 ## 9. Data model and performance
 
@@ -207,11 +230,11 @@ First launch with no player opens Welcome. Otherwise restore selected player/tab
 | Game | Canonical key, URL/UUID, PGN/start FEN/move hash, completion UTC, class/control/rules/rated, both players/rating/result, ECO, parse state |
 | PlayerGame | Player+game unique, color, window version/membership; shared games do not duplicate engine work |
 | Analysis | Game+policy active result, engine/net/scoring/tagger versions, status/next ply, summary/timestamps; retain prior review during replacement |
-| MoveAnalysis | Analysis+ply, mover/SAN/UCI, before/after White score or mate, best move/PVs, depth/nodes, loss/accuracy, severity/phase, evidence tags |
+| MoveAnalysis | Analysis+ply, mover/SAN/UCI, before/after White score or mate, engine line after the move, depth/nodes |
 | QueueBatch/Item | Batch player/created/state/blockers; game+policy unique active job, priority/checkpoint/attempt/error |
 | Preferences | Selected player/tab/filters, schema version, system appearance |
 
-Index end time, player-game membership, analysis completion/policy, severity/phase/pattern and queue priority/state. Page lists in 50-row batches. Store incremental per-game/category summaries; never load 50,000 PGNs or scan all move arrays on the main thread. Test derived totals against original rows through migrations.
+Index end time, player-game membership, analysis completion/policy and queue priority/state. Page lists in 50-row batches. Never load 50,000 PGNs or scan all move arrays on the main thread. Test derived totals against original rows through migrations.
 
 Persist user database under Application Support, not purgeable caches. Retain games/reviews until explicit deletion. HTTP caches/temporary exports/logs are disposable. Include database in normal OS device backup, exclude bundled engine/nets/temp files. Do not promise OS backup availability; app deletion may remove data and manual export is the controlled recovery route.
 
@@ -227,7 +250,7 @@ Clear analysis confirms deletion of relevant reviews/checkpoints, keeps games. R
 
 ## 11. Accessibility, privacy and errors
 
-Minimum 44×44 pt targets; Dynamic Type; labeled toolbar/tab controls; severity/outcome conveyed by text as well as color. Accessible square/piece and move descriptions, chart summaries/data lists, tracked-player orientation, Reduce Motion. Long usernames fit accessibly. Sheets have clear cancel/close routes; keep underlying filter/scroll state. No errors detected is distinct from no completed analyses.
+Minimum 44×44 pt targets; Dynamic Type; labeled toolbar/tab controls; a move's effect on the bar and outcomes conveyed by text as well as color. Accessible square/piece and move descriptions, chart summaries/data lists, tracked-player orientation, Reduce Motion. Long usernames fit accessibly. Sheets have clear cancel/close routes; keep underlying filter/scroll state.
 
 Failures preserve context and data: provider failure is not a paywall; low storage is not permission to delete; failed game does not stop a batch; purchase failure does not remove reviews; invalid import fails before commit. Logs are local and avoid full PGNs/profile details by default. No third-party tracking or analytics SDK. Privacy copy explains direct public-provider requests and Apple purchases, and that exports contain player/game data.
 
@@ -237,7 +260,7 @@ Wireframes use restrained monochrome structure and one accent; final branding re
 
 1. With 1,001 eligible games, free scope is latest 1,000 before filters. Oldest saved review remains viewable but excluded from metrics and free reanalysis.
 2. Shared games are analyzed once; per-player colors/denominators differ correctly. Matching ID renames preserve history; mismatches never merge.
-3. Short/timeout/abandoned games count and score normally. Zero-move game counts with unavailable accuracy. Bad PGN is visible without fabricated metrics.
+3. Short/timeout/abandoned games count and score normally. Zero-move game counts with nothing to evaluate. Bad PGN is visible without fabricated metrics.
 4. White/Black sign tests are symmetric; exact best move gets zero loss; mate-to-mate is not a missed mate; recorded result does not replace evaluation.
 5. Termination loses at most the games in progress, which restart; completed games are kept; unfinished game never publishes final metrics. Multiple pause reasons compose correctly.
 6. Free bulk is unavailable. Expiry/pending/cancellation/grace/refund/offline/restore follow §3; no imported data grants access.
@@ -248,7 +271,7 @@ Wireframes use restrained monochrome structure and one accent; final branding re
 
 ## 13. Development defaults and calibration
 
-The defaults in §§2/5/7/10 resolve previous open technical questions: iOS 17/SwiftUI/SQLite; Stockfish 18; node-limited standard-v2; severity cutoffs 5/10/20; arithmetic game accuracy; rules/templates; battery cutoff/recovery 20/30%; storage 500/750 MiB; merge-only schema-1 backups. Fixtures/device measurements may justify tuning **before release**, with policy/version changes whenever output changes. No silent new tier or cloud dependency.
+The defaults in §§2/5/7/10 resolve previous open technical questions: iOS 17/SwiftUI/SQLite; Stockfish 18; node-limited eval-v1; battery cutoff/recovery 20/30%; storage 500/750 MiB; merge-only schema-1 backups. Fixtures/device measurements may justify tuning **before release**, with policy/version changes whenever output changes. No silent new tier or cloud dependency.
 
 Implementation milestones and tests are in [development-plan.md](docs/development-plan.md). Initial engine integration, chess-rules dependency selection, and mobile performance measurements are implementation tasks, not additional product questionnaires.
 
@@ -260,4 +283,4 @@ Implementation milestones and tests are in [development-plan.md](docs/developmen
 - Working title: Chess Games Analyser. Original branding/assets; no Chess.com logo/name in the title. Descriptive provider copy and unaffiliated disclaimer need final terms/branding review; a disclaimer is not permission. [Chess.com agreement](https://www.chess.com/legal/user-agreement).
 - Supply real source/privacy/terms/support URLs, notices and app-privacy disclosures. Complete physical-device benchmarks, StoreKit sandbox tests, accessibility checks and source-release audit. This specification does not claim those have passed.
 
-Technical references: [Stockfish 18 release](https://github.com/official-stockfish/Stockfish/releases/tag/sf_18), [StoreKit entitlements](https://developer.apple.com/documentation/storekit/transaction/currententitlements), [thermal states](https://developer.apple.com/documentation/foundation/processinfo/thermalstate-swift.enum).
+Technical references: [Stockfish 19 release](https://github.com/official-stockfish/Stockfish/releases/tag/sf_19), [StoreKit entitlements](https://developer.apple.com/documentation/storekit/transaction/currententitlements), [thermal states](https://developer.apple.com/documentation/foundation/processinfo/thermalstate-swift.enum).

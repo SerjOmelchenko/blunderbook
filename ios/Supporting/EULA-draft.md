@@ -16,9 +16,9 @@ minimum required terms.
 
 ---
 
-## Licence Agreement for Chess Analyser
+## Licence Agreement for Blunderbook
 
-Chess Analyser is free software. It is licensed to you under the **GNU General Public License,
+Blunderbook is free software. It is licensed to you under the **GNU General Public License,
 version 3 or later** ("GPLv3"), a copy of which is included in the application and available at
 <https://www.gnu.org/licenses/gpl-3.0.html>.
 

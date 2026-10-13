@@ -12,7 +12,7 @@ import Foundation
 /// Transactional, versioned migrations. Each migration is applied inside one transaction and the
 /// user version is only advanced when it commits, so an interrupted upgrade re-runs cleanly.
 enum Schema {
-    static let currentVersion = 9
+    static let currentVersion = 11
 
     /// - Parameter target: the version to stop at; tests use it to stage older databases.
     static func migrate(_ database: SQLiteDatabase, to target: Int = currentVersion) throws {
@@ -38,9 +38,51 @@ enum Schema {
         case 7: return version7
         case 8: return version8
         case 9: return version9
+        case 10: return version10
+        case 11: return version11
         default: return ""
         }
     }
+
+    /// How each mistake has gone on the Mistakes tab, for spaced repetition: every drill of it
+    /// ends with a result (`clean`, `helped`, `revealed`), and a clean solve moves it on to the
+    /// next interval (`MistakeSchedule`). `first_result` is the result of its first drill; a
+    /// mistake solved before this table existed keeps `solved`, which says nothing about first
+    /// tries. `ignored` hides a mistake the person has written off, such as a slip of the finger.
+    /// Keyed like `solved_mistakes`, by the game and the move, so a fresh review keeps them.
+    private static let version11 = """
+    CREATE TABLE mistake_reviews (
+        game_key TEXT NOT NULL,
+        ply INTEGER NOT NULL,
+        drills INTEGER NOT NULL DEFAULT 0,
+        streak INTEGER NOT NULL DEFAULT 0,
+        first_result TEXT,
+        last_result TEXT,
+        last_at REAL,
+        due_at REAL,
+        ignored INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (game_key, ply)
+    );
+    INSERT INTO mistake_reviews (game_key, ply, drills, streak, first_result, last_result, last_at, due_at)
+        SELECT game_key, ply, 1, 1, 'solved', 'solved', solved_at, solved_at + 259200 FROM solved_mistakes;
+    """
+
+    /// Searches of the first positions of reviewed games, so a game that opens like an earlier one
+    /// does not search those positions again (`PositionCache`). Keyed by the engine, the budget and
+    /// the exact moves from the standard start; a cached search is the search the engine would make.
+    private static let version10 = """
+    CREATE TABLE position_cache (
+        engine TEXT NOT NULL,
+        nodes INTEGER NOT NULL,
+        moves TEXT NOT NULL,
+        score TEXT NOT NULL,
+        best_move TEXT,
+        line TEXT NOT NULL DEFAULT '',
+        depth INTEGER NOT NULL,
+        searched_nodes INTEGER NOT NULL,
+        PRIMARY KEY (engine, nodes, moves)
+    ) WITHOUT ROWID;
+    """
 
     /// Players can come from Lichess as well as Chess.com. Every existing player is a Chess.com
     /// one. A username is only unique within its site; `provider_id` keeps its column-level

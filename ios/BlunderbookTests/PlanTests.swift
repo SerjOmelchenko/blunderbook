@@ -23,15 +23,30 @@ final class PlanTests: XCTestCase {
 
     func testOnlyTheTwoDeepestReviewDepthsArePremium() {
         XCTAssertEqual(ReviewDepth.allCases.filter(\.requiresPremium), [.deep, .deepest])
-        XCTAssertEqual(ReviewDepth.allCases.filter { !$0.requiresPremium }.map(\.typicalDepth), [19, 23])
+        XCTAssertEqual(ReviewDepth.allCases.filter { !$0.requiresPremium }, [.quick, .standard])
         XCTAssertFalse(ReviewDepth.default.requiresPremium)
         XCTAssertFalse(ReviewDepth.deepestFree.requiresPremium)
     }
 
+    func testEveryLevelSearchesDeeperThanTheOneBefore() {
+        let budgets = ReviewDepth.allCases.map(\.nodesPerPosition)
+        XCTAssertEqual(budgets, budgets.sorted())
+        XCTAssertEqual(Set(budgets).count, budgets.count)
+        XCTAssertEqual(ReviewDepth.default, .standard)
+        XCTAssertEqual(ReviewDepth.standard.nodesPerPosition, 1_500_000, "about what Lichess gives a position")
+    }
+
+    func testLevelsSavedBeforeTheReworkFallBackToTheDefault() {
+        // "fast" and "balanced" meant a quick pass plus confirmations; they no longer exist.
+        XCTAssertNil(ReviewDepth(rawValue: "fast"))
+        XCTAssertNil(ReviewDepth(rawValue: "balanced"))
+        XCTAssertEqual(ReviewDepth(rawValue: "deepest"), .deepest)
+    }
+
     func testAPremiumDepthRunsAtTheDeepestFreeOneWithoutPremium() {
-        XCTAssertEqual(ReviewDepth.deepest.available(isPremium: false), .balanced)
-        XCTAssertEqual(ReviewDepth.deep.available(isPremium: false), .balanced)
-        XCTAssertEqual(ReviewDepth.fast.available(isPremium: false), .fast)
+        XCTAssertEqual(ReviewDepth.deepest.available(isPremium: false), .standard)
+        XCTAssertEqual(ReviewDepth.deep.available(isPremium: false), .standard)
+        XCTAssertEqual(ReviewDepth.quick.available(isPremium: false), .quick)
         XCTAssertEqual(ReviewDepth.deepest.available(isPremium: true), .deepest)
     }
 

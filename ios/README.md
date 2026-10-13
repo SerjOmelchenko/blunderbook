@@ -73,7 +73,7 @@ three live lines for any position → results and rating statistics → export a
 | Provider | Chess.com Published-Data API with conditional requests, and the Lichess game export streamed as ND-JSON with resumable cursors. Both share one transport: `Retry-After`, jittered backoff, and classified failures. Each player belongs to one site; the same name on both is two players. |
 | Free plan | Analyse any single game, free and unlimited. Deep review is free too. "Analyse previous 100 games" is Premium. 3 tracked players. Every plan downloads and shows the whole history. |
 | Queue | Durable, deduplicated, several engines at once, manual preemption, composing blocker set (user, thermal, battery, Low Power Mode, entitlement, storage). |
-| Billing | StoreKit 2 against the real product `monthly_premium` (group "Premium Subscription", 1 month, Family Sharing off). Verified entitlements, updates listener, restore, cached valid-through for offline. Premium unlocks bulk analysis and unlimited players. |
+| Billing | StoreKit 2 against the real product `monthly_premium` (group "Premium Subscription", 1 month, Family Sharing off). Verified entitlements, updates listener, restore, cached valid-through for offline. Premium unlocks the Mistakes tab, the deepest review depths and unlimited players. |
 | Backup | Versioned `.chessbackup` (stored ZIP + manifest + NDJSON), staged validation before any write, merge-only atomic commit. |
 | UI | All 28 screens from the inventory, light and dark, Dynamic Type, VoiceOver labels, chart data alternatives, 44pt targets. |
 
@@ -116,13 +116,12 @@ are shown and counted as they are; a new analysis of the game replaces them.
 | | Free | Premium |
 |---|---|---|
 | Analyse a game you open | Yes, unlimited | Yes |
-| Analyse 100 games at once | — | Yes |
 | Tracked players | 3 | Unlimited |
 | History downloaded and shown | All of it | All of it |
 | Analysed games | Kept for good | Same |
 
-There are no credits or counters. Premium gates *starting* a bulk run; work already queued
-finishes even if the subscription lapses meanwhile, and saved reviews are always readable.
+There are no credits or counters. Games are analysed one at a time, as you open them; saved
+reviews are always readable.
 Earlier builds charged per-player credits; their queue rows still decode, and the old
 `player_allowances` table is simply no longer read.
 
@@ -198,7 +197,7 @@ reviews only.
 | W01 Welcome | W02 Add player | W03 Importing history |
 | W04 Tracked players | W05 Analytics | W07 Games |
 | W08 Filters | W09 Game review | W11 Individual analysis (inline on W09) |
-| W14 Bulk preparation | W15 Queue | |
+| W15 Queue | | |
 | W16 Premium plan | W17 Subscription | W18 Settings |
 | W19 Backup & restore | W20 Export | W21 Import preview |
 | W22 Import result | W23 Storage & data | W24 Confirmations |
@@ -242,8 +241,7 @@ colour, charts have a data-table alternative, and every tappable target is at le
   stored field.
 - **A game whose notation cannot be fully read fails visibly.** It stays in your game totals and no
   partial review is published from whatever prefix happened to parse.
-- **Premium gates starting bulk work, never reading.** Single-game reviews and every saved review
-  work on every plan; a bulk run already queued finishes even if the subscription lapses.
+- **Premium never gates reading.** Single-game reviews and every saved review work on every plan.
 
 ## Not done here
 

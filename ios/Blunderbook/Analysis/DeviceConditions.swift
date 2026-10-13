@@ -149,22 +149,25 @@ final class DeviceConditionsMonitor {
 /// Measured on an iPhone 16 Pro: one engine on a performance core searched about 1.1–1.4M nodes/s
 /// and warmed the phone within a minute, while one on an efficiency core searched about 250–300k
 /// nodes/s for a small fraction of the power, and four of them together about four times that.
-/// So efficiency-core engines carry the bulk work side by side, and the performance-core engine
-/// joins them only while the phone is cool. Searches are bounded by nodes, so none of this changes
-/// results — only how long they take. Reviews the person asks for always run on the performance
-/// core.
+/// So efficiency-core engines carry the bulk work side by side, and one performance-core engine
+/// joins them only while the device is cool and the app is on screen. Searches are bounded by nodes, so none of this changes
+/// results — only how long they take. A review the person asks for borrows every engine and is not
+/// paced: it is short, and someone is waiting for it. Its efficiency-core engines still run below
+/// the person's own work.
 enum ThermalPacing {
     struct Plan: Equatable {
-        /// Whether the performance-core engine also takes bulk games.
+        /// Whether the first performance-core engine also takes bulk games.
         var performanceBulk: Bool
         /// How many efficiency-core engines run bulk games.
         var efficiencyEngines: Int
     }
 
-    static func plan(thermal: ProcessInfo.ThermalState, efficiencyEngines: Int) -> Plan {
+    /// - Parameter inBackground: the app is not on screen. Bulk work then stays on the efficiency
+    ///   cores whatever the temperature.
+    static func plan(thermal: ProcessInfo.ThermalState, efficiencyEngines: Int, inBackground: Bool = false) -> Plan {
         switch thermal {
         case .nominal:
-            return Plan(performanceBulk: true, efficiencyEngines: efficiencyEngines)
+            return Plan(performanceBulk: !inBackground, efficiencyEngines: efficiencyEngines)
         case .fair:
             return Plan(performanceBulk: false, efficiencyEngines: efficiencyEngines)
         case .serious, .critical:
@@ -175,18 +178,36 @@ enum ThermalPacing {
         }
     }
 
-    /// Efficiency-core engines this device runs: one per efficiency core, from the kernel's
-    /// performance-level counts, and at most four — a measured six-core efficiency cluster gained
-    /// nothing beyond four. Each engine adds about 100 MB, so phones with less memory run fewer.
-    static let efficiencyEngineCount: Int = {
-        var count: Int32 = 0
-        var size = MemoryLayout<Int32>.size
-        let cores = sysctlbyname("hw.perflevel1.physicalcpu", &count, &size, nil, 0) == 0 && count > 0
-            ? Int(count)
-            : ProcessInfo.processInfo.processorCount - 2
-        let gibibytes = ProcessInfo.processInfo.physicalMemory / (1 << 30)
-        let memoryLimit = gibibytes >= 6 ? 4 : gibibytes >= 4 ? 3 : 2
-        return max(1, min(4, cores, memoryLimit))
+    /// Engines this device runs, from its own core counts, never a list of models. Analysis always
+    /// leaves the person one performance core and half the efficiency cores, so the device stays
+    /// usable: `P − 1` performance-core engines (at least one) and `⌊E / 2⌋` efficiency-core ones
+    /// (at least one), at most `maximumEngines` in all, performance cores first, and at most one
+    /// engine per gibibyte of memory (each needs about 100 MB, and the app shares the device).
+    static let performanceEngineCount: Int = engineCounts.performance
+    static let efficiencyEngineCount: Int = engineCounts.efficiency
+
+    /// Beyond this a game has too few positions left to share out for more engines to help.
+    static let maximumEngines = 8
+
+    static func engineCounts(performanceCores: Int, efficiencyCores: Int, memoryGiB: Int) -> (performance: Int, efficiency: Int) {
+        let budget = max(2, min(maximumEngines, memoryGiB))
+        let performance = max(1, min(performanceCores - 1, budget - 1))
+        let efficiency = max(1, min(efficiencyCores / 2, budget - performance))
+        return (performance, efficiency)
+    }
+
+    private static let engineCounts: (performance: Int, efficiency: Int) = {
+        func cores(_ level: Int) -> Int? {
+            var count: Int32 = 0
+            var size = MemoryLayout<Int32>.size
+            let found = sysctlbyname("hw.perflevel\(level).physicalcpu", &count, &size, nil, 0) == 0 && count > 0
+            return found ? Int(count) : nil
+        }
+        let total = ProcessInfo.processInfo.processorCount
+        let performance = cores(0) ?? max(1, total / 3)
+        return engineCounts(performanceCores: performance,
+                            efficiencyCores: cores(1) ?? max(0, total - performance),
+                            memoryGiB: Int(ProcessInfo.processInfo.physicalMemory / (1 << 30)))
     }()
 }
 

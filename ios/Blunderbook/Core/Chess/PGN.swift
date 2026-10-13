@@ -16,6 +16,9 @@ struct PGNGame {
     var moves: [Move] = []
     var sanMoves: [String] = []
     var result: String = "*"
+    /// Each move's mover's clock after it, in seconds, from its `[%clk h:mm:ss]` comment; nil
+    /// for a move without one. Same length as `moves`.
+    var clocks: [TimeInterval?] = []
     /// Set when the movetext stopped being legal. Preceding moves are still usable (§4:
     /// malformed games stay visible instead of being discarded).
     var parseError: String?
@@ -54,11 +57,30 @@ enum PGNParser {
                 }
                 game.sanMoves.append(board.san(for: move))
                 game.moves.append(move)
+                game.clocks.append(nil)
                 board.makeMove(move)
+            case .comment(let value):
+                // A comment belongs to the move before it.
+                if !game.clocks.isEmpty, let clock = clock(in: value) { game.clocks[game.clocks.count - 1] = clock }
             }
         }
         if game.result == "*", let tagResult = tags["Result"] { game.result = tagResult }
         return game
+    }
+
+    /// The seconds in a `[%clk 0:09:58.5]` command, as Chess.com and Lichess write them.
+    static func clock(in comment: String) -> TimeInterval? {
+        guard let start = comment.range(of: "[%clk") else { return nil }
+        let rest = comment[start.upperBound...].drop { $0 == " " }
+        guard let end = rest.firstIndex(of: "]") else { return nil }
+        let fields = rest[..<end].trimmingCharacters(in: .whitespaces).split(separator: ":")
+        guard (1...3).contains(fields.count) else { return nil }
+        var seconds: TimeInterval = 0
+        for field in fields {
+            guard let value = TimeInterval(field), value >= 0 else { return nil }
+            seconds = seconds * 60 + value
+        }
+        return seconds
     }
 
     // MARK: - Tags
@@ -111,6 +133,8 @@ enum PGNParser {
     private enum Token {
         case san(String)
         case result(String)
+        /// A `{…}` comment on the main line.
+        case comment(String)
     }
 
     private static let resultTokens: Set<String> = ["1-0", "0-1", "1/2-1/2", "*"]
@@ -143,7 +167,13 @@ enum PGNParser {
             switch character {
             case "{":
                 flush()
-                while index < text.endIndex, text[index] != "}" { index = text.index(after: index) }
+                var comment = ""
+                index = text.index(after: index)
+                while index < text.endIndex, text[index] != "}" {
+                    comment.append(text[index])
+                    index = text.index(after: index)
+                }
+                if variationDepth == 0 { tokens.append(.comment(comment)) }
             case ";":
                 flush()
                 while index < text.endIndex, !text[index].isNewline { index = text.index(after: index) }

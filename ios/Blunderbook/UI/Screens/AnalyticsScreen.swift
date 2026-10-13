@@ -18,9 +18,14 @@ struct AnalyticsSnapshot {
     var totalDownloaded = 0
     /// The newest game of the time class, for "Analyse latest game".
     var latestGame: GameListEntry?
-    /// Today's games of the time class, and those still without an in-depth analysis.
-    var todayGames = 0
-    var todayToAnalyse: [String] = []
+    /// The newest loss of the time class.
+    var lastLoss: GameListEntry?
+    /// The loss of the last three months to the opponent rated furthest below the player.
+    var upset: (entry: GameListEntry, gap: Int)?
+    /// The latest game in the opening family the player scores worst in.
+    var weakOpening: (entry: GameListEntry, opening: GamePickRepository.WeakOpening)?
+    /// A game picked at random, kept until it is reviewed or the view changes.
+    var randomGame: GameListEntry?
 }
 
 @MainActor
@@ -39,7 +44,9 @@ final class AnalyticsModel {
         let games = app.games
         let filters = app.filters
         let scope = app.scope
-        let analyses = app.analyses
+        let picks = GamePickRepository(database: app.database)
+        // The random pick stays put while it still needs a review, so it never changes under a finger.
+        let keptRandom = snapshot.randomGame.flatMap { $0.game.timeClass == filters.timeClass ? $0.game.gameKey : nil }
 
         let result = await Task.detached(priority: .userInitiated) { () -> AnalyticsSnapshot in
             var snapshot = AnalyticsSnapshot()
@@ -54,11 +61,26 @@ final class AnalyticsModel {
             latestFilters.dateRange = .allTime
             snapshot.latestGame = ((try? games.page(playerID: player.id, filters: latestFilters,
                                                      scope: .allDownloaded, limit: 1)) ?? []).first
-            let today = (try? games.eligibleKeys(playerID: player.id, scope: .allDownloaded,
-                                                 timeClass: filters.timeClass,
-                                                 since: Calendar.current.startOfDay(for: Date()))) ?? []
-            snapshot.todayGames = today.count
-            snapshot.todayToAnalyse = (try? analyses.withoutDeepReview(today)) ?? []
+
+            func entry(_ key: String?) -> GameListEntry? {
+                key.flatMap { (try? games.entry(playerID: player.id, gameKey: $0)) ?? nil }
+            }
+            let timeClass = filters.timeClass
+            snapshot.lastLoss = entry((try? picks.lastLoss(playerID: player.id, timeClass: timeClass)) ?? nil)
+            let threeMonthsAgo = Calendar.current.date(byAdding: .month, value: -3, to: Date()) ?? .distantPast
+            if let upset = (try? picks.biggestUpset(playerID: player.id, timeClass: timeClass, since: threeMonthsAgo)) ?? nil,
+               let game = entry(upset.gameKey) {
+                snapshot.upset = (game, upset.gap)
+            }
+            if let weak = (try? picks.weakestOpening(playerID: player.id, timeClass: timeClass)) ?? nil,
+               let game = entry(weak.gameKey) {
+                snapshot.weakOpening = (game, weak)
+            }
+            if let kept = entry(keptRandom), !kept.hasDeepReview {
+                snapshot.randomGame = kept
+            } else {
+                snapshot.randomGame = entry((try? picks.random(playerID: player.id, timeClass: timeClass)) ?? nil)
+            }
             return snapshot
         }.value
 
@@ -78,9 +100,6 @@ struct AnalyticsScreen: View {
     @State private var showsRatingData = false
     /// Where a finger is on the rating chart, while it is there.
     @State private var selectedRatingDate: Date?
-    @State private var showsBulkPreparation = false
-    /// How many of today's games were just queued, to say so on the button.
-    @State private var queuedToday: Int?
 
     private var snapshot: AnalyticsSnapshot { analytics.snapshot }
 
@@ -108,6 +127,7 @@ struct AnalyticsScreen: View {
             }
             .padding(.bottom, 40)
         }
+        .defaultScrollAnchor(debugScrollAnchor)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Picker("Time class", selection: Binding(
@@ -133,12 +153,15 @@ struct AnalyticsScreen: View {
         .sheet(isPresented: $showsRatingData) {
             RatingDataSheet(points: snapshot.rating, timeClass: model.filters.timeClass)
         }
-        .sheet(isPresented: $showsBulkPreparation) { BulkPreparationSheet().hostsPaywall() }
-        .task {
-            #if DEBUG
-            if DevelopmentSeed.opensBulkPreparation { showsBulkPreparation = true }
-            #endif
-        }
+    }
+
+    /// `-scroll-bottom` in debug builds: open scrolled to the analysis rows.
+    private var debugScrollAnchor: UnitPoint? {
+        #if DEBUG
+        return DevelopmentSeed.scrollsToBottom ? .bottom : nil
+        #else
+        return nil
+        #endif
     }
 
     private var taskKey: String {
@@ -367,94 +390,104 @@ struct AnalyticsScreen: View {
 
     // MARK: Analysis
 
-    /// The quick ways in, one row each: the game just played, everything played today, and the
-    /// previous hundred games.
+    /// The quick ways in, one game each: the game just played, the last loss, the biggest upset,
+    /// the latest game in the weakest opening, and one at random. Like a game's rings in Games, a
+    /// row starts the analysis here; the bottom bar shows it running and, when it lands, you fly
+    /// into the game. One game at a time, so there is no row for several.
     @ViewBuilder
     private var quickAnalysis: some View {
         VStack(spacing: 10) {
-            if let latest = snapshot.latestGame {
-                NavigationLink(value: Route.gameReview(gameKey: latest.game.gameKey, ply: nil)) {
-                    analyseRow(symbol: "bolt.fill", title: "Analyse latest game") {
-                        HStack(spacing: 4) {
-                            Text(latest.outcome.label)
-                                .foregroundStyle(latest.outcome.color)
-                                .fontWeight(.semibold)
-                            Text("vs \(latest.opponent.username) · \(Format.relative(latest.game.endTime))")
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    } trailing: {
-                        if latest.hasDeepReview, let accuracy = latest.accuracy {
-                            AccuracyRing(value: accuracy)
-                        }
-                    }
+            pickRow(snapshot.latestGame, symbol: "bolt.fill", title: "Analyse latest game",
+                    empty: "No \(model.filters.timeClass.label.lowercased()) games yet") { latest in
+                HStack(spacing: 4) {
+                    Text(latest.outcome.label)
+                        .foregroundStyle(latest.outcome.color)
+                        .fontWeight(.semibold)
+                    Text("vs \(latest.opponent.username) · \(Format.relative(latest.game.endTime))")
                 }
+            }
+            let timeClass = model.filters.timeClass.label.lowercased()
+            pickRow(snapshot.lastLoss, symbol: "flag.fill", title: "Analyse last loss",
+                    empty: "No \(timeClass) losses yet") { game in
+                Text("\(Self.howLost(game)) vs \(game.opponent.username) · \(Format.relative(game.game.endTime))")
+            }
+            pickRow(snapshot.upset?.entry, symbol: "arrow.down.right", title: "Analyse biggest upset",
+                    empty: "No upsets in the last 3 months") { game in
+                Text("\(snapshot.upset?.gap ?? 0) below you · \(game.opponent.username) · \(Format.relative(game.game.endTime))")
+            }
+            pickRow(snapshot.weakOpening?.entry, symbol: "book.closed.fill", title: "Analyse weakest opening",
+                    empty: "Needs 5 \(timeClass) games in one opening") { _ in
+                if let weak = snapshot.weakOpening?.opening {
+                    Text("\(weak.name) · \(Int((weak.score * 100).rounded()))% in \(weak.games) games")
+                }
+            }
+            pickRow(snapshot.randomGame, symbol: "dice.fill", title: "Analyse random game",
+                    empty: "No \(timeClass) games yet") { game in
+                Text("\(game.outcome.label) vs \(game.opponent.username) · \(Format.relative(game.game.endTime))")
+            }
+        }
+    }
+
+    /// A quick row for one picked game. Not analysed yet: a tap starts its analysis right here,
+    /// with the rings spinning at the row's end, and the game opens when it lands
+    /// (`AppModel.analyseThenOpen`). While another game is analysed the row waits, dimmed.
+    /// Already analysed: a tap opens it. With nothing to pick it stays in place, dimmed, and
+    /// says why.
+    @ViewBuilder
+    private func pickRow<Detail: View>(_ game: GameListEntry?, symbol: String, title: String, empty: String,
+                                       @ViewBuilder detail: @escaping (GameListEntry) -> Detail) -> some View {
+        if let game {
+            let key = game.game.gameKey
+            let isBusy = model.coordinator.activeGames[key] != nil
+                || (model.isAnalysingAGame && model.pendingReveal?.gameKey == key)
+            let row = analyseRow(symbol: symbol, title: title) {
+                detail(game)
+                    .lineLimit(1)
+            } trailing: {
+                if isBusy {
+                    AccuracyRings(phase: .busy)
+                        .scaleEffect(0.8)
+                        .frame(width: 32, height: 32)
+                } else if game.hasDeepReview, let accuracy = game.accuracy {
+                    AccuracyRing(value: accuracy)
+                }
+            }
+            if game.hasDeepReview, !isBusy {
+                NavigationLink(value: Route.gameReview(gameKey: key, ply: nil)) { row }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens the game and its analysis")
+            } else {
+                Button {
+                    guard !isBusy else { return }
+                    model.analyseThenOpen(gameKey: key)
+                } label: { row }
                 .buttonStyle(.plain)
-                .accessibilityHint("Opens the game and analyses it in depth")
+                // Not disabled while it runs: a disabled row dims, and the spin should stay bright.
+                .disabled(!isBusy && (model.isAnalysingAGame || !model.canAnalyse))
+                .accessibilityHint(isBusy ? "Analysing; the game opens when it is done"
+                                   : model.isAnalysingAGame ? "Another game is being analysed. Games are analysed one at a time."
+                                   : "Analyses the game here, then opens it")
             }
-            todayRow
-            previousHundredRow
-        }
-    }
-
-    /// Queues an in-depth analysis of every game of the time class played today that has none.
-    private var todayRow: some View {
-        let toAnalyse = snapshot.todayToAnalyse
-        let timeClass = model.filters.timeClass.label.lowercased()
-        let detail: String
-        if let queuedToday {
-            detail = "Analysing \(queuedToday) game\(queuedToday == 1 ? "" : "s")"
-        } else if snapshot.todayGames == 0 {
-            detail = "No \(timeClass) games today"
-        } else if toAnalyse.isEmpty {
-            detail = "All \(snapshot.todayGames) analysed"
         } else {
-            detail = "\(toAnalyse.count) of \(snapshot.todayGames) to analyse"
-        }
-        return Button {
-            if model.requestReviews(gameKeys: toAnalyse) == nil {
-                withAnimation(.smooth(duration: 0.3)) { queuedToday = toAnalyse.count }
-            }
-        } label: {
-            analyseRow(symbol: "sun.max.fill", title: "Analyse all today's games") {
-                Text(detail).contentTransition(.opacity)
+            analyseRow(symbol: symbol, title: title) {
+                Text(empty).lineLimit(1)
             } trailing: {
-                if queuedToday != nil || (snapshot.todayGames > 0 && toAnalyse.isEmpty) {
-                    Image(systemName: "checkmark")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Palette.improved)
-                }
+                EmptyView()
             }
+            .disabled(true)
         }
-        .buttonStyle(.plain)
-        .disabled(queuedToday != nil || toAnalyse.isEmpty || !model.canAnalyse)
-        .onChange(of: snapshot.todayToAnalyse) { _, _ in queuedToday = nil }
     }
 
-    /// Bulk takes the most recent games without an in-depth review of the time class being viewed, across the
-    /// player's whole window rather than just the date range; the preparation sheet it opens
-    /// spells out what will be queued. Premium, so locked rows say so.
-    private var previousHundredRow: some View {
-        let plan = model.bulkPlan()
-        let timeClass = model.filters.timeClass.label.lowercased()
-        return Button {
-            showsBulkPreparation = true
-        } label: {
-            analyseRow(symbol: "square.stack.3d.up.fill", title: "Analyse previous \(AppModel.bulkBatchSize) games") {
-                Text(plan.eligible.isEmpty
-                     ? "Every \(timeClass) game has an in-depth review"
-                     : "\(plan.eligible.count) \(timeClass) game\(plan.eligible.count == 1 ? "" : "s") to review in depth")
-            } trailing: {
-                if !model.canAnalyseInBulk {
-                    Label("Premium", systemImage: "lock.fill")
-                        .labelStyle(.iconOnly)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(Palette.brass)
-                }
-            }
+    /// "Mated", "Flagged"…: how the player lost, from their result code, in a chess player's
+    /// short words so the row's line fits a phone.
+    private static func howLost(_ game: GameListEntry) -> String {
+        switch game.player.resultCode.lowercased() {
+        case "checkmated": return "Mated"
+        case "resigned": return "Resigned"
+        case "timeout": return "Flagged"
+        case "abandoned": return "Abandoned"
+        default: return "Lost"
         }
-        .buttonStyle(.plain)
-        .disabled(plan.eligible.isEmpty || !model.canAnalyse)
     }
 
     /// One row of the quick analysis list: an icon, what it does, and a line of detail.

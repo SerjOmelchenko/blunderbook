@@ -72,20 +72,17 @@ final class GameAnalysisOrderTests: XCTestCase {
                           plyCount: parsed.moves.count)
     }
 
-    func testDeepReviewConfirmsAtTheChosenDepth() throws {
+    func testDeepReviewSearchesEveryPositionOnceAtTheChosenDepth() throws {
         let recording = RecordingEngine(try engines().0)
         let game = makeGame(pgn: missedMate, key: "depth")
-        _ = try GameAnalyzer(engine: recording).analyze(game: game, deep: true, reviewDepth: .fast,
-                                                        cancellation: CancellationToken())
+        let review = try GameAnalyzer(engine: recording).analyze(game: game, deep: true, reviewDepth: .quick,
+                                                                 cancellation: CancellationToken())
 
-        let budgets = recording.searches.map(\.budget)
-        XCTAssertEqual(Array(budgets.prefix(game.plyCount + 1)),
-                       Array(repeating: DeepReview.standardNodes, count: game.plyCount + 1),
-                       "every position first gets the standard budget")
-        let confirmations = budgets.dropFirst(game.plyCount + 1)
-        XCTAssertFalse(confirmations.isEmpty, "the missed mate needs confirming")
-        XCTAssertTrue(confirmations.allSatisfy { $0 == ReviewDepth.fast.confirmationNodes },
-                      "and is confirmed at the chosen depth")
+        XCTAssertEqual(recording.searches.map(\.budget),
+                       Array(repeating: ReviewDepth.quick.nodesPerPosition, count: game.plyCount + 1),
+                       "one search per position, even around the missed mate, and nothing else")
+        XCTAssertEqual(recording.searches.map(\.plies).sorted(), Array(0...game.plyCount))
+        XCTAssertTrue(review.moves.allSatisfy { $0.labels?.confirmed == false })
     }
 
     func testEveryPositionIsSearchedOnceFromAClearedEngine() throws {
@@ -113,6 +110,18 @@ final class GameAnalysisOrderTests: XCTestCase {
         let onAnotherEngine = try GameAnalyzer(engine: second).analyze(game: game, cancellation: CancellationToken())
 
         XCTAssertEqual(afterAnotherGame.moves, onAnotherEngine.moves, "every stored field, not just the scores")
+    }
+
+    func testADeepReviewSplitOverEnginesMatchesOneEngine() throws {
+        let (first, second) = try engines()
+        let game = makeGame(pgn: missedMate, key: "split")
+        let alone = try GameAnalyzer(engine: first).analyze(game: game, deep: true, reviewDepth: .quick,
+                                                            cancellation: CancellationToken())
+        let split = try GameAnalyzer(engine: first, helpers: [second]).analyze(game: game, deep: true, reviewDepth: .quick,
+                                                                              cancellation: CancellationToken())
+        XCTAssertEqual(alone.moves, split.moves, "every stored field, labels included")
+        XCTAssertEqual(alone.whiteAccuracy, split.whiteAccuracy)
+        XCTAssertEqual(alone.blackAccuracy, split.blackAccuracy)
     }
 
     func testCancellingMidSearchStopsWithNothingScored() throws {

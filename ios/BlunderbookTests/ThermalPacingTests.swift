@@ -36,9 +36,27 @@ final class ThermalPacingTests: XCTestCase {
         XCTAssertEqual(plan(.nominal, engines: 2).efficiencyEngines, 2)
     }
 
-    func testEfficiencyEnginesNeverExceedFour() {
-        XCTAssertGreaterThanOrEqual(ThermalPacing.efficiencyEngineCount, 1)
-        XCTAssertLessThanOrEqual(ThermalPacing.efficiencyEngineCount, 4)
+    func testEnginesLeaveTheDeviceAFastCoreAndHalfItsEfficiencyCores() {
+        func counts(_ p: Int, _ e: Int, _ gib: Int) -> [Int] {
+            let result = ThermalPacing.engineCounts(performanceCores: p, efficiencyCores: e, memoryGiB: gib)
+            return [result.performance, result.efficiency]
+        }
+        XCTAssertEqual(counts(2, 4, 8), [1, 2], "iPhone 16 Pro")
+        XCTAssertEqual(counts(2, 4, 6), [1, 2])
+        XCTAssertEqual(counts(4, 6, 16), [3, 3], "M5 MacBook")
+        XCTAssertEqual(counts(10, 4, 24), [7, 1], "M4 Pro: eight at most, performance cores first")
+        XCTAssertEqual(counts(24, 8, 96), [7, 1])
+        XCTAssertEqual(counts(2, 4, 2), [1, 1], "one engine per GiB of memory")
+        XCTAssertEqual(counts(1, 0, 2), [1, 1], "always at least one of each")
+
+        XCTAssertLessThanOrEqual(ThermalPacing.performanceEngineCount + ThermalPacing.efficiencyEngineCount,
+                                 ThermalPacing.maximumEngines)
+    }
+
+    func testBulkLeavesThePerformanceCoresAloneInTheBackground() {
+        XCTAssertTrue(ThermalPacing.plan(thermal: .nominal, efficiencyEngines: 2).performanceBulk)
+        XCTAssertFalse(ThermalPacing.plan(thermal: .nominal, efficiencyEngines: 2, inBackground: true).performanceBulk)
+        XCTAssertEqual(ThermalPacing.plan(thermal: .nominal, efficiencyEngines: 2, inBackground: true).efficiencyEngines, 2)
     }
 
     // MARK: - Learned limit

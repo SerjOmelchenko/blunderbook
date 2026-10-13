@@ -8,7 +8,6 @@
 //  PURPOSE. See the GNU General Public License (LICENSE) for more details.
 
 import SwiftUI
-import Charts
 
 @MainActor
 @Observable
@@ -24,11 +23,25 @@ final class GameReviewModel {
     private(set) var deepFailure: AnalysisHeader?
     /// Which opening each position had reached, and which moves were book.
     private(set) var openingTrace = OpeningTrace.empty
+    /// The game's clock move by move, when its PGN carries one.
+    private(set) var clock: GameClock?
+    /// Key moments, accuracy by phase and the rest of what a deep review says about the game.
+    private(set) var insights = ReviewInsights.empty
+    /// The player's results in this game's opening, from two games up.
+    private(set) var openingRecord: OpeningRecord?
+    /// The book's move where the game left it, numbered: "6. Be2".
+    private(set) var theoryMove: String?
+    /// For the player's errors with a pattern, by move index: how many times the pattern has come
+    /// up in the 30 days up to and including this one, from the second time.
+    private(set) var repeatCounts: [Int: Int] = [:]
     private var startFEN = ChessBoard.startFEN
+    /// Each move's ring squares, worked out once: the body asks on every redraw.
+    @ObservationIgnored private var targetCache: [Int: [Int]] = [:]
     /// The game on screen, so a reload after its analysis finishes keeps the person's place.
     private var loadedKey: String?
 
-    /// Number of moves played: 0 is the starting position, `moves.count` is the final position.
+    /// Number of moves played: 0 is the starting position, `moves.count` is the final position,
+    /// and one more is the summary of a deep review.
     var ply = 0
     var orientation: PieceColor = .white
 
@@ -36,6 +49,28 @@ final class GameReviewModel {
     var playerColor: PieceColor { entry?.color ?? .white }
     var hasReview: Bool { analysis?.status == .complete }
     var hasDeepReview: Bool { hasReview && analysis?.isDeep == true }
+
+    /// The last place stepping can reach: the summary after a deep review's last move.
+    var lastPly: Int { moves.count + (hasDeepReview && !moves.isEmpty ? 1 : 0) }
+    var isSummary: Bool { hasDeepReview && !moves.isEmpty && ply == moves.count + 1 }
+    /// The position on the board: the final one under the summary.
+    var boardPly: Int { min(ply, moves.count) }
+
+    /// The moves of the running review scored so far (`AnalysisEvent.partial`), shown until the
+    /// finished review replaces them. Accuracy and the Mistakes backlog wait for the finished one.
+    var partial: [MoveAnalysis] = []
+    var isShowingPartial: Bool { !hasDeepReview && !partial.isEmpty }
+    /// The moves on screen: the running review's while it runs, otherwise the saved review's.
+    var shownMoves: [MoveAnalysis] { isShowingPartial ? partial : analysis?.moves ?? [] }
+    /// Whether moves carry a deep review's labels, finished or not.
+    var showsLabels: Bool { hasDeepReview || isShowingPartial }
+
+    /// The evaluation of the position on screen, when the running review has scored it.
+    var partialScore: EngineScore? {
+        guard isShowingPartial else { return nil }
+        if boardPly == 0 { return partial.first { $0.ply == 0 }?.scoreBefore }
+        return currentMove?.scoreAfter
+    }
 
     func load(app: AppModel, gameKey: String, initialPly: Int?) {
         guard let player = app.selectedPlayer else { return }
@@ -48,33 +83,75 @@ final class GameReviewModel {
         let isReload = loadedKey == gameKey
         loadedKey = gameKey
         // The moves never change; a reload only brings the finished analysis.
-        guard !isReload || snapshots.isEmpty else { return }
-        orientation = entry?.color ?? .white
-        let parsed = PGNParser.parse(game.pgn)
-        parseError = parsed.parseError
-        moves = parsed.moves
-        sanMoves = parsed.sanMoves
-        startFEN = parsed.startFEN
+        if !isReload || snapshots.isEmpty {
+            orientation = entry?.color ?? .white
+            let parsed = PGNParser.parse(game.pgn)
+            parseError = parsed.parseError
+            moves = parsed.moves
+            sanMoves = parsed.sanMoves
+            startFEN = parsed.startFEN
+            clock = GameClock(clocks: parsed.clocks, timeControl: game.timeControl)
 
-        guard let board = ChessBoard(fen: parsed.startFEN) else { return }
-        var positions: [[Piece?]] = [board.snapshot]
-        var checks: [Int?] = [board.isInCheck ? board.kingSquare(of: board.sideToMove) : nil]
-        for move in parsed.moves {
-            board.makeMove(move)
-            positions.append(board.snapshot)
-            checks.append(board.isInCheck ? board.kingSquare(of: board.sideToMove) : nil)
-        }
-        snapshots = positions
-        checkSquares = checks
-        openingTrace = OpeningBook.shared.trace(startFEN: parsed.startFEN, moves: parsed.moves)
+            guard let board = ChessBoard(fen: parsed.startFEN) else { return }
+            var positions: [[Piece?]] = [board.snapshot]
+            var checks: [Int?] = [board.isInCheck ? board.kingSquare(of: board.sideToMove) : nil]
+            for move in parsed.moves {
+                board.makeMove(move)
+                positions.append(board.snapshot)
+                checks.append(board.isInCheck ? board.kingSquare(of: board.sideToMove) : nil)
+            }
+            snapshots = positions
+            checkSquares = checks
+            openingTrace = OpeningBook.shared.trace(startFEN: parsed.startFEN, moves: parsed.moves)
+            theoryMove = bookExitIndex.flatMap { index in
+                guard let board = self.board(atPly: index),
+                      let move = OpeningBook.shared.theoryMoves(from: board).first else { return nil }
+                return EngineLine.notation(for: [move], from: board, maxPlies: 1)
+            }
+            let record = game.openingName.flatMap { name in
+                name.isEmpty ? nil : try? app.statistics.openingRecord(playerID: player.id, openingName: name)
+            }
+            openingRecord = (record?.games ?? 0) >= 2 ? record : nil
 
-        // A review reads from the start of the game, like a scoresheet. Mistakes stay one tap
-        // away through Next mistake; a caller that wants a particular move passes it in.
-        if let initialPly {
-            ply = min(max(0, initialPly + 1), moves.count)
-        } else {
-            ply = 0
+            // A review reads from the start of the game, like a scoresheet. Mistakes stay one tap
+            // away through Next key moment; a caller that wants a particular move passes it in.
+            if let initialPly {
+                ply = min(max(0, initialPly + 1), lastPly)
+            } else {
+                ply = 0
+            }
         }
+        refreshInsights(app: app, playerID: player.id, endTime: game.endTime)
+    }
+
+    /// What the saved deep review says beyond each move: worked out again whenever it arrives.
+    private func refreshInsights(app: AppModel, playerID: UUID, endTime: Date) {
+        guard hasDeepReview, let analysis else {
+            insights = .empty
+            repeatCounts = [:]
+            return
+        }
+        insights = ReviewInsights(moves: analysis.moves, player: playerColor) { self.severity(of: $0) }
+        targetCache = [:]
+        var counts: [Int: Int] = [:]
+        var seen: [PatternTag: Int] = [:]
+        var earlier: [PatternTag: Int] = [:]
+        for (index, move) in analysis.moves.enumerated() where move.mover == playerColor && severity(of: move) != nil {
+            guard let tag = move.labels?.tags.first else { continue }
+            if earlier[tag] == nil {
+                earlier[tag] = (try? app.statistics.patternCount(playerID: playerID, tag: tag, before: endTime)) ?? 0
+            }
+            seen[tag, default: 0] += 1
+            let total = (earlier[tag] ?? 0) + (seen[tag] ?? 0)
+            if total >= 2 { counts[index] = total }
+        }
+        repeatCounts = counts
+    }
+
+    /// The first move off the book, when the game had book moves and then left them.
+    var bookExitIndex: Int? {
+        let index = openingTrace.bookMoves
+        return index > 0 && index < moves.count ? index : nil
     }
 
     /// Where Explore starts from the position on screen: the real game up to `ply`, with its
@@ -82,10 +159,10 @@ final class GameReviewModel {
     var exploreStart: ExploreStart? {
         guard entry != nil, ChessBoard(fen: startFEN) != nil else { return nil }
         return ExploreStart(startFEN: startFEN,
-                            history: Array(moves.prefix(ply)),
+                            history: Array(moves.prefix(boardPly)),
                             playerColor: playerColor,
                             orientation: orientation,
-                            origin: ply == 0 ? "From the starting position" : "After \(currentMoveLabel)")
+                            origin: boardPly == 0 ? "From the starting position" : "After \(currentMoveLabel)")
     }
 
     /// The real position after `ply` moves, with its history, for the live engine lines.
@@ -99,24 +176,27 @@ final class GameReviewModel {
 
     /// The analysed move that produced the current position.
     var currentMove: MoveAnalysis? {
-        guard ply > 0 else { return nil }
-        return analysis?.moves.first { $0.ply == ply - 1 }
+        guard ply > 0, ply <= moves.count else { return nil }
+        return shownMoves.first { $0.ply == ply - 1 }
     }
 
     /// Whether the move at `ply` (0 is White's first move) is shown as a book move: known theory
     /// that the review did not find to be a blunder.
     func isBook(ply: Int) -> Bool {
         guard openingTrace.isBook(ply: ply) else { return false }
-        return analysis?.moves.first { $0.ply == ply }?.severity != .blunder
+        return shownMoves.first { $0.ply == ply }?.severity != .blunder
     }
 
     /// Whether the move that produced the current position was a book move.
-    var isBookMove: Bool { ply > 0 && isBook(ply: ply - 1) }
+    var isBookMove: Bool { ply > 0 && ply <= moves.count && isBook(ply: ply - 1) }
+
+    /// Whether the move that produced the current position left the book.
+    var isBookExit: Bool { bookExitIndex.map { ply == $0 + 1 } ?? false }
 
     /// The opening as of the current position. The starting position shows the opening the game
     /// went on to reach; a game the book does not know falls back to Chess.com's name for it.
     var currentOpening: Opening? {
-        if let opening = ply == 0 ? openingTrace.opening : openingTrace.opening(afterPlies: ply) {
+        if let opening = boardPly == 0 ? openingTrace.opening : openingTrace.opening(afterPlies: boardPly) {
             return opening
         }
         guard openingTrace.opening == nil, let name = game?.openingName, !name.isEmpty else { return nil }
@@ -131,49 +211,121 @@ final class GameReviewModel {
 
     func isError(_ move: MoveAnalysis) -> Bool { severity(of: move) != nil }
 
+    /// What kind of mistake a move was, as Mistakes names it: its first pattern, or its
+    /// consequence when no pattern explains it.
+    func kindLabel(of move: MoveAnalysis) -> String? {
+        guard let labels = move.labels else { return nil }
+        return MistakeCategory.kinds(tags: labels.tags, consequence: labels.consequence).first?.title
+    }
+
+    /// What the lines panel says about the move on screen, when it is worth stopping at.
+    var verdict: ReviewVerdict? {
+        guard hasDeepReview, let move = currentMove else { return nil }
+        let index = move.ply
+        if move.mover == playerColor, let severity = severity(of: move), let labels = move.labels {
+            let (number, whiteToMove) = Self.turn(fen: move.fenBefore)
+            return .error(severity,
+                          kind: kindLabel(of: move),
+                          spent: clock?.spent[safe: index] ?? nil,
+                          missedChance: insights.moments[index] == .missedChance,
+                          repeatCount: repeatCounts[index],
+                          best: .init(score: move.scoreBefore,
+                                      notation: Self.notation(labels.bestLineSAN, fullmove: number, whiteToMove: whiteToMove)),
+                          punish: .init(score: move.scoreAfter,
+                                        notation: Self.notation(move.lineSAN, fullmove: whiteToMove ? number : number + 1,
+                                                                whiteToMove: !whiteToMove)))
+        }
+        if move.mover != playerColor, let severity = severity(of: move) {
+            // "No forcing line" says nothing about the opponent's move; their chance needs a pattern.
+            let kind = move.labels.flatMap { $0.tags.first }.map(\.label)
+            return .chance(severity, kind: kind)
+        }
+        if insights.moments[index] == .punished {
+            let taken = shownMoves.first { $0.ply == index - 1 }
+            return .punished(kind: taken.flatMap(kindLabel(of:)), clockLeft: clock?.remaining[safe: index] ?? nil)
+        }
+        return nil
+    }
+
+    /// The fullmove number and side to move of a FEN.
+    private static func turn(fen: String) -> (Int, Bool) {
+        let fields = fen.split(separator: " ")
+        return (fields.count > 5 ? Int(fields[5]) ?? 1 : 1, fields.count > 1 ? fields[1] == "w" : true)
+    }
+
+    /// "13. Bxa6 Qf6 14. Qe2", or "13… Bxc4 14. Qxc4" from Black's move, as the live lines read.
+    static func notation(_ san: [String], fullmove: Int, whiteToMove: Bool, maxPlies: Int = 8) -> String {
+        var number = fullmove, white = whiteToMove, parts: [String] = []
+        for (index, move) in san.prefix(maxPlies).enumerated() {
+            if white { parts.append("\(number). \(move)") }
+            else { parts.append(index == 0 ? "\(number)\u{2026} \(move)" : move); number += 1 }
+            white.toggle()
+        }
+        return parts.joined(separator: " ")
+    }
+
     var currentPresentation: BoardPresentation {
         guard !snapshots.isEmpty else { return .empty }
-        let index = min(ply, snapshots.count - 1)
-        var evidence: [Int] = []
-        if let best = suggestedMove { evidence = [best.toSquare] }
-        var badge: SquareBadge?
+        let index = min(boardPly, snapshots.count - 1)
+        let lastMove = boardPly > 0 ? moves[boardPly - 1] : nil
+        var presentation = BoardPresentation(pieces: snapshots[index],
+                                             orientation: orientation,
+                                             lastMove: lastMove,
+                                             checkSquare: checkSquares[index])
+        guard !isSummary, let lastMove else { return presentation }
         if isBookMove {
-            badge = SquareBadge(square: moves[ply - 1].toSquare, text: "", color: Palette.book, symbol: "book.fill")
-        } else if let move = currentMove, let severity = severity(of: move), ply > 0 {
-            badge = SquareBadge(square: moves[ply - 1].toSquare, text: severity.marker, color: severity.color)
+            presentation.badge = SquareBadge(square: lastMove.toSquare, text: "", color: Palette.book, symbol: "book.fill")
+            return presentation
         }
-        return BoardPresentation(pieces: snapshots[index],
-                                 orientation: orientation,
-                                 lastMove: ply > 0 ? moves[ply - 1] : nil,
-                                 suggestedMove: suggestedMove,
-                                 checkSquare: checkSquares[index],
-                                 evidenceSquares: evidence,
-                                 badge: badge)
+        guard let move = currentMove else { return presentation }
+        let mine = move.mover == playerColor
+        if let severity = severity(of: move) {
+            presentation.badge = SquareBadge(square: lastMove.toSquare, text: severity.marker, color: severity.color)
+            if mine {
+                // What to play instead, and how the opponent punishes what was played.
+                presentation.suggestedMove = move.labels?.bestLineUCI.first.flatMap(Move.fromUCI)
+                presentation.threatMove = move.lineUCI.first.flatMap(Move.fromUCI)
+                presentation.targetRings = targets(of: move)
+                let missed: Set<PatternTag> = [.missedCapture, .missedFork, .missedMate]
+                presentation.ringColor = move.labels?.tags.first.map { missed.contains($0) } == true ? Palette.brand : Palette.blunder
+            } else if let tag = move.labels?.tags.first, ![.missedCapture, .missedFork, .missedMate].contains(tag) {
+                // The opponent's error is the player's chance: what it left open, in green.
+                presentation.targetRings = targets(of: move)
+                presentation.ringColor = Palette.best
+            }
+        } else if insights.moments[move.ply] == .punished {
+            presentation.badge = SquareBadge(square: lastMove.toSquare, text: "", color: Palette.best, symbol: "checkmark")
+        }
+        return presentation
+    }
+
+    private func targets(of move: MoveAnalysis) -> [Int] {
+        if let cached = targetCache[move.ply] { return cached }
+        let squares = move.patternTargets
+        targetCache[move.ply] = squares
+        return squares
     }
 
     /// "12. Nf3" or "12… Nf6" for the move that produced the current position.
     var currentMoveLabel: String {
-        guard ply > 0, ply <= sanMoves.count else { return "Start" }
-        let index = ply - 1
+        guard boardPly > 0, boardPly <= sanMoves.count else { return "Start" }
+        return moveLabel(boardPly - 1)
+    }
+
+    func moveLabel(_ index: Int) -> String {
         let number = index / 2 + 1
         return index % 2 == 0 ? "\(number). \(sanMoves[index])" : "\(number)\u{2026} \(sanMoves[index])"
     }
 
-    /// In a deep review, the engine's preferred move in the position *before* a mistake, drawn as
-    /// an arrow.
-    private var suggestedMove: Move? {
-        guard let move = currentMove, isError(move) else { return nil }
-        return move.labels?.bestLineUCI.first.flatMap(Move.fromUCI)
-    }
-
     var currentScore: EngineScore {
         if let move = currentMove { return move.scoreAfter }
-        if let first = analysis?.moves.first { return first.scoreBefore }
+        if boardPly > 0, let move = shownMoves.first(where: { $0.ply == boardPly - 1 }) { return move.scoreAfter }
+        if let first = shownMoves.first { return first.scoreBefore }
         return .centipawns(0)
     }
 
     func step(_ delta: Int) {
-        ply = min(max(0, ply + delta), moves.count)
+        ply = min(max(0, ply + delta), lastPly)
     }
 
     /// The tracked player's errors in a deep review.
@@ -181,18 +333,116 @@ final class GameReviewModel {
         (analysis?.moves ?? []).filter { isError($0) && $0.mover == playerColor }.map(\.ply)
     }
 
-    func goToPreviousError() {
-        let target = errorPlies.last { $0 + 1 < ply }
-        if let target { ply = target + 1 }
+    /// The positions after the key moments: the player's errors and the chances they took.
+    private var keyPlies: [Int] { insights.keyMoments.map { $0 + 1 } }
+
+    /// Where Next key moment goes: the next one, then the summary, then back to the start.
+    var nextKeyPly: Int {
+        if isSummary { return 0 }
+        return keyPlies.first { $0 > ply } ?? lastPly
     }
 
-    func goToNextError() {
-        let target = errorPlies.first { $0 + 1 > ply }
-        if let target { ply = target + 1 }
+    var nextKeyTitle: String {
+        if isSummary { return "Back to start" }
+        return keyPlies.contains { $0 > ply } ? "Next key moment" : "Summary"
     }
 
-    var hasPreviousError: Bool { errorPlies.contains { $0 + 1 < ply } }
-    var hasNextError: Bool { errorPlies.contains { $0 + 1 > ply } }
+    var previousKeyPly: Int? { keyPlies.last { $0 < ply } }
+
+    // MARK: Graph and summary
+
+    /// White's win percentage at each scored position.
+    var graphPoints: [(ply: Int, win: Double)] {
+        let moves = shownMoves.sorted { $0.ply < $1.ply }
+        var points: [(Int, Double)] = []
+        if let first = moves.first, first.ply == 0 { points.append((0, Scoring.winPercent(first.scoreBefore))) }
+        points += moves.map { ($0.ply + 1, Scoring.winPercent($0.scoreAfter)) }
+        return points
+    }
+
+    var graphMarkers: [GraphMarker] {
+        guard showsLabels else { return [] }
+        var markers: [GraphMarker] = []
+        for move in shownMoves {
+            let ply = move.ply + 1
+            if insights.moments[move.ply] == .missedChance { markers.append(GraphMarker(ply: ply, kind: .missedChance)) }
+            if let severity = severity(of: move) {
+                markers.append(GraphMarker(ply: ply, kind: move.mover == playerColor ? .playerError(severity) : .opponentError(severity)))
+            } else if insights.moments[move.ply] == .punished {
+                markers.append(GraphMarker(ply: ply, kind: .punished))
+            }
+        }
+        return markers
+    }
+
+    var graphPhases: [(phase: GamePhase, ply: Int)] {
+        insights.phaseStarts.map { (phase: $0.key, ply: $0.value) }.sorted { $0.ply < $1.ply }
+    }
+
+    /// The player's time per move, for ticks under the graph: a fast error in its colour, a long
+    /// think in amber.
+    var graphTicks: [GraphTick] {
+        guard let clock else { return [] }
+        return clock.spent.indices.compactMap { index in
+            guard (index % 2 == 0) == (playerColor == .white), let spent = clock.spent[index] else { return nil }
+            let severity = shownMoves.first { $0.ply == index }.flatMap(severity(of:))
+            let tint: Color
+            if let severity, spent <= 5 { tint = severity.color }
+            else if spent >= 60 { tint = Palette.brand }
+            else { tint = Color.white.opacity(0.32) }
+            return GraphTick(ply: index + 1, spent: spent, tint: tint)
+        }
+    }
+
+    var lowTimePly: Int? { clock?.lowTimeStart(for: playerColor).map { $0 + 1 } }
+
+    var summary: ReviewSummary? {
+        guard hasDeepReview, let entry, let analysis, !moves.isEmpty else { return nil }
+        let opponentColor = playerColor.opposite
+        let result: String = {
+            let loser: GameSide? = entry.outcome == .win ? entry.opponent : entry.outcome == .loss ? entry.player : nil
+            let how = loser.map { ResultCodes.description(for: $0.resultCode) } ?? ResultCodes.description(for: entry.player.resultCode)
+            return "\(entry.outcome.label) · \(how) · move \((moves.count + 1) / 2)"
+        }()
+        var facts: [ReviewSummary.Fact] = []
+        if let exit = bookExitIndex {
+            facts.append(.init(label: "Left book", value: moveLabel(exit) + (theoryMove.map { " · theory was \($0)" } ?? ""), ply: exit + 1))
+        }
+        if let worst = insights.biggestError, let move = analysis.moves[safe: worst], let severity = severity(of: move) {
+            let best = move.labels?.bestMoveSAN.map { " · best was \($0)" } ?? ""
+            facts.append(.init(label: "Biggest swing", value: moveLabel(worst) + severity.marker + best, ply: worst + 1))
+        }
+        let taken = insights.moments.filter { $0.value == .punished }.map(\.key).sorted()
+        let missed = insights.moments.filter { $0.value == .missedChance }.map(\.key).sorted()
+        if !taken.isEmpty || !missed.isEmpty {
+            facts.append(.init(label: "Chances", value: "Took \(taken.count) of \(taken.count + missed.count)",
+                               ply: (missed.first ?? taken.first).map { $0 + 1 }))
+        }
+        if let clock {
+            let final = playerColor == .white ? clock.clocks(afterPlies: moves.count).white : clock.clocks(afterPlies: moves.count).black
+            if let low = clock.lowTimeStart(for: playerColor) {
+                facts.append(.init(label: "Clock", value: "Under \(GameClock.format(clock.lowTime)) from move \(low / 2 + 1)"
+                                   + (final.map { " · \(GameClock.format($0)) left" } ?? ""), ply: low + 1))
+            } else if let final {
+                facts.append(.init(label: "Clock", value: "\(GameClock.format(final)) left at the end", ply: nil))
+            }
+        }
+        let phases = GamePhase.allCases.compactMap { phase -> (phase: GamePhase, player: Double?, opponent: Double?)? in
+            guard let accuracy = insights.phaseAccuracy[phase] else { return nil }
+            return (phase, playerColor == .white ? accuracy.white : accuracy.black, playerColor == .white ? accuracy.black : accuracy.white)
+        }
+        return ReviewSummary(result: result,
+                             player: .init(name: entry.player.username, accuracy: analysis.accuracy(for: playerColor),
+                                           errors: insights.errorCounts[playerColor] ?? [:], isPlayer: true),
+                             opponent: .init(name: entry.opponent.username, accuracy: analysis.accuracy(for: opponentColor),
+                                             errors: insights.errorCounts[opponentColor] ?? [:], isPlayer: false),
+                             phases: phases,
+                             facts: facts)
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }
 
 // MARK: - W09 Game review
@@ -216,10 +466,12 @@ struct GameReviewScreen: View {
     /// Cached rather than queried from the body: the body re-evaluates on every drag of the
     /// evaluation graph, and a database hit per frame is not acceptable there.
     @State private var isQueuedHere = false
-    /// Set once this screen has asked for the analysis, so it never asks twice.
-    @State private var hasRequestedAnalysis = false
     @State private var refusal: AppModel.ReviewRefusal?
     @Namespace private var chipSelection
+    @Namespace private var playerRows
+    /// The record in this opening, opened by a tap; it also opens by itself where the game
+    /// leaves the book.
+    @State private var isRecordOpen = false
     /// The player's errors already sent to the Mistakes backlog on this visit, by ply.
     @State private var collectedErrors: Set<Int> = []
     /// Errors that have landed in the tray, and a tick for its bounce as each one lands.
@@ -303,7 +555,7 @@ struct GameReviewScreen: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    withAnimation(.smooth(duration: 0.3)) { review.orientation = review.orientation.opposite }
+                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.45)) { review.orientation = review.orientation.opposite }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
                 }
@@ -313,13 +565,21 @@ struct GameReviewScreen: View {
         .task(id: "\(gameKey)|\(model.dataVersion)|\(model.coordinator.counts.completed)|\(model.coordinator.counts.pending)") {
             review.load(app: model, gameKey: gameKey, initialPly: initialPly)
             isQueuedHere = ((try? model.queue.activeItem(gameKey: gameKey, policyID: DeepReview.identifier)) ?? nil) != nil
-            startAnalysisIfNeeded()
         }
         .sensoryFeedback(.selection, trigger: review.ply)
-        .onChange(of: review.ply) { _, _ in refreshLines(); collectCurrentError() }
+        .onChange(of: review.boardPly) { _, _ in refreshLines() }
+        .onChange(of: review.ply) { _, _ in collectCurrentError() }
         .onChange(of: review.hasDeepReview) { _, _ in collectCurrentError() }
         .onChange(of: review.moves.count) { _, _ in refreshLines() }
+        .onChange(of: model.coordinator.partialReviews[gameKey]?.count ?? 0, initial: true) { _, _ in
+            // Kept once the review finishes, until the saved one is loaded in its place.
+            if let moves = model.coordinator.partialReviews[gameKey] { review.partial = moves }
+        }
         .onChange(of: isTooHotForLines) { _, _ in refreshLines() }
+        .onChange(of: showsEngine) { _, _ in refreshLines() }
+        .onAppear {
+            if model.reveal?.gameKey == gameKey { model.reveal?.hasArrived = true }
+        }
         .onDisappear { liveLines.clear() }
     }
 
@@ -330,29 +590,52 @@ struct GameReviewScreen: View {
         if let entry = review.entry {
             openingLine
                 .padding(.horizontal, Layout.contentInset)
-            EvaluationLine(score: barScore,
-                           orientation: review.orientation,
-                           isSettled: review.hasReview || !liveLines.lines.isEmpty)
-                .padding(.horizontal, Layout.contentInset)
+            if showsEngine {
+                EvaluationLine(score: barScore,
+                               orientation: review.orientation,
+                               isSettled: review.hasReview || review.partialScore != nil || !liveLines.lines.isEmpty)
+                    .padding(.horizontal, Layout.contentInset)
+                    .padding(.top, 2)
+                    .padding(.bottom, 6)
+            } else {
+                Color.clear.frame(height: 6)
+            }
+            playerRow(review.orientation.opposite, entry: entry)
+                .padding(.leading, Layout.contentInset)
+                .padding(.trailing, Layout.gutter)
+                .padding(.bottom, 2)
+            // Edge to edge: the board is the content. Past the last move it steps back for the
+            // summary, which takes its place.
+            ZStack {
+                BoardView(presentation: boardPresentation, cornerRadius: 0)
+                    .scaleEffect(review.isSummary ? 0.92 : 1)
+                    .blur(radius: review.isSummary ? 7 : 0)
+                    .opacity(review.isSummary ? 0.2 : 1)
+                    .allowsHitTesting(!review.isSummary)
+                    .accessibilityHidden(review.isSummary)
+                if review.isSummary, let summary = review.summary {
+                    SummaryCard(summary: summary) { go(to: $0) }
+                        .transition(.opacity.combined(with: .offset(y: 16)))
+                }
+            }
+            .animation(reduceMotion ? nil : .smooth(duration: 0.5), value: review.isSummary)
+            .simultaneousGesture(swipeToStep)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { boardFrame = $0 }
+            .layoutValue(key: IsReviewBoard.self, value: true)
+            playerRow(review.orientation, entry: entry)
+                .padding(.leading, Layout.contentInset)
+                .padding(.trailing, Layout.gutter)
                 .padding(.top, 2)
-                .padding(.bottom, 6)
-            playerLine(entry.opponent, isTop: true)
-                .padding(.horizontal, Layout.contentInset)
-                .padding(.bottom, 4)
-            // Edge to edge: the board is the content.
-            BoardView(presentation: boardPresentation, cornerRadius: 0)
-                .simultaneousGesture(swipeToStep)
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { boardFrame = $0 }
-                .layoutValue(key: IsReviewBoard.self, value: true)
-            playerLine(entry.player, isTop: false)
-                .padding(.horizontal, Layout.contentInset)
-                .padding(.top, 4)
-            linesPanel
-                .padding(.horizontal, Layout.contentInset)
-                .padding(.top, 4)
-            timelineSlot
-                .padding(.horizontal, Layout.contentInset)
-                .padding(.top, 4)
+            if showsEngine {
+                linesPanel
+                    .padding(.horizontal, Layout.contentInset)
+                    .padding(.top, 4)
+            }
+            if showsEngine || statusKind != nil {
+                timelineSlot
+                    .padding(.horizontal, Layout.contentInset)
+                    .padding(.top, 4)
+            }
             if !review.moves.isEmpty {
                 moveStrip
                     .padding(.horizontal, Layout.contentInset)
@@ -365,7 +648,7 @@ struct GameReviewScreen: View {
     /// as a badge and a thin line along its foot.
     private var timelineSlot: some View {
         ZStack(alignment: .leading) {
-            if review.hasReview, statusKind.map(\.isInProgress) ?? true {
+            if review.hasReview || review.isShowingPartial, statusKind.map(\.isInProgress) ?? true {
                 evaluationGraph
                     .overlay(alignment: .bottom) {
                         if case .running(let percent)? = statusKind {
@@ -381,7 +664,7 @@ struct GameReviewScreen: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 40)
+        .frame(height: review.clock == nil ? 40 : EvaluationGraph.lineHeight + EvaluationGraph.tickHeight + 3)
     }
 
     @ViewBuilder
@@ -413,7 +696,9 @@ struct GameReviewScreen: View {
     /// has finished. Lines from the previous position are never drawn over the new one.
     private var boardPresentation: BoardPresentation {
         var presentation = review.currentPresentation
-        if !liveLines.isCalculating, !isTooHotForLines {
+        // On the player's error the better move and the punishment are the arrows; live lines
+        // would only crowd them.
+        if !liveLines.isCalculating, !isTooHotForLines, presentation.threatMove == nil, !review.isSummary {
             presentation.lineArrows = liveLines.lines.compactMap(\.firstMove)
         }
         return presentation
@@ -481,9 +766,12 @@ struct GameReviewScreen: View {
         Button {
             openMistakes()
         } label: {
+            let total = review.errorPlies.count
+            let isFull = total > 0 && trayCount >= total
             HStack(spacing: 4) {
-                Image(systemName: trayCount > 0 ? "tray.full.fill" : "tray")
-                Text("\(trayCount)")
+                Image(systemName: isFull ? "tray.and.arrow.down.fill" : trayCount > 0 ? "tray.full.fill" : "tray")
+                    .contentTransition(.symbolEffect(.replace))
+                Text(verbatim: "\(min(trayCount, total))/\(total)")
                     .monospacedDigit()
                     .contentTransition(.numericText(value: Double(trayCount)))
             }
@@ -491,7 +779,8 @@ struct GameReviewScreen: View {
             .foregroundStyle(trayCount > 0 ? Palette.brand : Palette.inkTertiary)
             .padding(.horizontal, 8)
             .frame(height: 22)
-            .background(Capsule().fill(Color.white.opacity(0.08)))
+            .background(Capsule().fill(isFull ? Palette.brandSoft : Color.white.opacity(0.08)))
+            .animation(.smooth(duration: 0.3), value: isFull)
             // A long opening name truncates; the tray keeps its size.
             .fixedSize()
             .phaseAnimator([1.0, 1.3, 1.0], trigger: trayLandings) { content, scale in
@@ -502,14 +791,14 @@ struct GameReviewScreen: View {
         .buttonStyle(.plain)
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { trayFrame = $0 }
         .accessibilityLabel("Mistakes backlog")
-        .accessibilityValue("\(trayCount) from this game")
+        .accessibilityValue("\(trayCount) of \(review.errorPlies.count) errors from this game collected")
         .accessibilityHint("Opens the Mistakes tab")
     }
 
     // MARK: Stepping
 
     private func go(to ply: Int) {
-        withAnimation(stepAnimation) { review.ply = min(max(0, ply), review.moves.count) }
+        withAnimation(stepAnimation) { review.ply = min(max(0, ply), review.lastPly) }
     }
 
     private func step(_ delta: Int) { go(to: review.ply + delta) }
@@ -527,16 +816,16 @@ struct GameReviewScreen: View {
 
     // MARK: Analysis
 
-    /// Asks for this game's analysis the first time it is opened without one. A game analysed
-    /// in bulk gets the deeper analysis now; one whose analysis failed waits for Try again.
-    private func startAnalysisIfNeeded() {
-        guard !hasRequestedAnalysis, review.entry != nil, !review.moves.isEmpty, review.parseError == nil,
-              !review.hasDeepReview, review.deepFailure == nil, !isQueuedHere, model.engineError == nil else { return }
-        requestAnalysis()
+    /// Whether the engine has anything to say here: a saved analysis, or one on its way. A game
+    /// with neither is shown as it is, to go through without evaluations or engine lines.
+    private var showsEngine: Bool {
+        review.hasReview || review.isShowingPartial || isQueuedHere
+            || model.coordinator.fraction(forGame: gameKey) != nil
     }
 
+    /// Opening a game never starts its analysis (that is the rings' job in Games, and the rows on
+    /// Analytics); this is only Try again after a failure.
     private func requestAnalysis() {
-        hasRequestedAnalysis = true
         refusal = model.requestReview(gameKey: gameKey, deep: true)
         if refusal == nil { isQueuedHere = true }
     }
@@ -550,6 +839,7 @@ struct GameReviewScreen: View {
         case unavailable(String)
         case noMoves
         case unreadable(String)
+        case anotherGame
 
         /// Work under way that needs nothing from the viewer, so it can share the graph's slot.
         var isInProgress: Bool {
@@ -572,7 +862,7 @@ struct GameReviewScreen: View {
         }
         if let failure = review.deepFailure { return .failed(failure.errorMessage) }
         if case .engineUnavailable(let reason) = refusal { return .unavailable(reason) }
-        if !review.hasReview, let engineError = model.engineError { return .unavailable(engineError) }
+        if refusal == .anotherGameAnalysing { return .anotherGame }
         return nil
     }
 
@@ -616,6 +906,9 @@ struct GameReviewScreen: View {
                     statusLine("Analysis is unavailable. \(reason)", tone: Palette.loss)
                 case .noMoves:
                     statusLine("No moves to analyse. The game still counts in your totals.", tone: Palette.inkSecondary)
+                case .anotherGame:
+                    statusLine("Another game is being analysed. Games are analysed one at a time.",
+                               tone: Palette.inkSecondary)
                 case .unreadable(let detail):
                     statusLine("This game's notation could not be fully read: \(detail)", tone: Palette.brass)
                 }
@@ -648,6 +941,7 @@ struct GameReviewScreen: View {
     /// list; before a game is reviewed it follows the live lines instead.
     private var barScore: EngineScore {
         if review.hasReview { return review.currentScore }
+        if let score = review.partialScore { return score }
         return liveLines.lines.first?.score ?? .centipawns(0)
     }
 
@@ -655,7 +949,7 @@ struct GameReviewScreen: View {
     private var isTooHotForLines: Bool { model.conditions.blockers.contains(.thermal) }
 
     private func refreshLines() {
-        guard !isTooHotForLines, let board = review.board(atPly: review.ply) else {
+        guard showsEngine, !isTooHotForLines, let board = review.board(atPly: review.boardPly) else {
             liveLines.clear()
             return
         }
@@ -665,17 +959,43 @@ struct GameReviewScreen: View {
     @ViewBuilder
     private var linesPanel: some View {
         if !review.moves.isEmpty, liveLines.isAvailable {
-            EngineLinesPanel(lines: liveLines, isTooHot: isTooHotForLines)
+            ZStack(alignment: .topLeading) {
+                if let verdict = review.verdict, !isTooHotForLines || isErrorVerdict(verdict) {
+                    VerdictPanel(verdict: verdict, liveLines: liveLines.lines, isCalculating: liveLines.isCalculating) {
+                        openRepeatedKind()
+                    }
+                    .id(review.ply)
+                    .transition(.opacity)
+                } else {
+                    EngineLinesPanel(lines: liveLines, isTooHot: isTooHotForLines)
+                        .transition(.opacity)
+                }
+            }
+            .frame(height: EngineLinesPanel.height, alignment: .top)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: review.verdict)
         }
+    }
+
+    private func isErrorVerdict(_ verdict: ReviewVerdict) -> Bool {
+        if case .error = verdict { return true }
+        return false
+    }
+
+    /// The repeat count opens Mistakes at every game's errors of this kind.
+    private func openRepeatedKind() {
+        guard let tag = review.currentMove?.labels?.tags.first else { return }
+        openMistakes(kind: .pattern(tag))
     }
 
     // MARK: Sections
 
     /// The opening reached so far, above the evaluation line. A book move says so in front of
-    /// the name; the name keeps the last one reached once the game leaves the book.
+    /// the name; the move that leaves the book says what theory played instead. The player's
+    /// record in the opening sits beside it, then the Mistakes tray.
     private var openingLine: some View {
         let opening = review.currentOpening
         let isBook = review.isBookMove
+        let isExit = review.isBookExit
         return HStack(spacing: 6) {
             HStack(spacing: 6) {
                 if isBook {
@@ -685,7 +1005,13 @@ struct GameReviewScreen: View {
                         .foregroundStyle(Palette.book)
                         .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .leading)))
                 }
-                if let opening {
+                if isExit {
+                    Text(review.theoryMove.map { "Out of book · theory was \($0)" } ?? "Out of book")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Palette.book)
+                        .lineLimit(1)
+                        .transition(.opacity.combined(with: .offset(y: 5)))
+                } else if let opening {
                     if !opening.eco.isEmpty {
                         Text(opening.eco)
                             .font(.caption.weight(.semibold))
@@ -698,11 +1024,18 @@ struct GameReviewScreen: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .contentTransition(.opacity)
+                        .transition(.opacity.combined(with: .offset(y: -5)))
                 }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(openingAccessibilityText(opening, isBook: isBook))
+            .accessibilityLabel(openingAccessibilityText(opening, isBook: isBook, isExit: isExit))
             Spacer(minLength: 0)
+            if let record = review.openingRecord {
+                OpeningRecordChip(record: record, isOpen: isRecordOpen || isExit) {
+                    withAnimation(.smooth(duration: 0.4)) { isRecordOpen.toggle() }
+                }
+                .transition(.opacity)
+            }
             if review.hasDeepReview {
                 mistakeTray
                     .transition(.opacity)
@@ -711,51 +1044,47 @@ struct GameReviewScreen: View {
         // The tray's height whether or not it shows, so the board never resizes for it.
         .frame(minHeight: 22)
         .animation(.smooth(duration: 0.25), value: isBook)
+        .animation(.smooth(duration: 0.3), value: isExit)
         .animation(.smooth(duration: 0.25), value: opening)
     }
 
-    private func openingAccessibilityText(_ opening: Opening?, isBook: Bool) -> String {
+    private func openingAccessibilityText(_ opening: Opening?, isBook: Bool, isExit: Bool) -> String {
         var parts: [String] = []
         if isBook { parts.append("Book move") }
+        if isExit { parts.append("Out of book" + (review.theoryMove.map { ", theory was \($0)" } ?? "")) }
         if let opening { parts.append("Opening: \(opening.name)\(opening.eco.isEmpty ? "" : ", \(opening.eco)")") }
         return parts.isEmpty ? "Opening not known" : parts.joined(separator: ". ")
     }
 
-    private func playerLine(_ side: GameSide, isTop: Bool) -> some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(isTop ? (review.orientation == .white ? Palette.pieceDark : Palette.pieceLight)
-                            : (review.orientation == .white ? Palette.pieceLight : Palette.pieceDark))
-                .frame(width: 9, height: 9)
-                .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
-            Text(side.username)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Palette.ink)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if let rating = side.rating {
-                Text(verbatim: "\(rating)")
-                    .font(.caption)
-                    .foregroundStyle(Palette.inkSecondary)
-                    .monospacedDigit()
+    /// One player beside the board. Rows follow their colour when the board flips: the two slide
+    /// past each other.
+    private func playerRow(_ color: PieceColor, entry: GameListEntry) -> some View {
+        let isPlayer = color == review.playerColor
+        let side = isPlayer ? entry.player : entry.opponent
+        let ply = review.boardPly
+        let balance = MaterialBalance(pieces: review.snapshots.indices.contains(ply) ? review.snapshots[ply] : [])
+        let clocks = review.clock?.clocks(afterPlies: ply)
+        let isOver = ply >= review.moves.count && !review.moves.isEmpty
+        let result: String? = {
+            guard isOver else { return nil }
+            // The loser's way of losing, or the draw's reason; a clockless game keeps the old
+            // place of the result at the top.
+            if side.outcome == .loss || (side.outcome == .draw && color == .black) {
+                return ResultCodes.description(for: side.resultCode)
             }
-            Spacer(minLength: 4)
-            if isTop, let entry = review.entry {
-                Text(ResultCodes.description(for: entry.opponent.resultCode))
-                    .font(.caption)
-                    .foregroundStyle(Palette.inkSecondary)
-            } else if !isTop, let accuracy = accuracyForPlayer {
-                HStack(spacing: 6) {
-                    AccuracyRing(value: accuracy, style: .inline)
-                    Text("Accuracy \(Format.accuracy(accuracy))")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Palette.brand)
-                        .monospacedDigit()
-                }
-                .transition(.opacity)
-            }
-        }
-        .frame(minHeight: 22)
+            return nil
+        }()
+        return ReviewPlayerRow(side: side,
+                               color: color,
+                               material: balance.ahead[color] ?? [],
+                               lead: balance.lead(for: color),
+                               accuracy: isPlayer ? accuracyForPlayer : nil,
+                               clock: color == .white ? clocks?.white : clocks?.black,
+                               isOnMove: !isOver && (ply % 2 == 0) == (color == .white),
+                               lowTime: review.clock?.lowTime ?? 60,
+                               result: result)
+            .matchedGeometryEffect(id: color, in: playerRows)
+            .id(color)
     }
 
     private var accuracyForPlayer: Double? {
@@ -763,64 +1092,34 @@ struct GameReviewScreen: View {
         return review.analysis?.accuracy(for: review.playerColor)
     }
 
-    /// A slim line rather than a boxed chart: drag along it to move through the game.
+    /// A slim line rather than a boxed chart: drag along it to move through the game. Phases
+    /// are bands behind it, key moves are marked on it, and the player's time per move runs
+    /// underneath when the game has a clock.
     private var evaluationGraph: some View {
-        let moves = review.analysis?.moves ?? []
-        return Chart {
-            RuleMark(y: .value("Level", 50))
-                .foregroundStyle(Color.white.opacity(0.16))
-                .lineStyle(StrokeStyle(lineWidth: 1))
-            ForEach(moves) { move in
-                AreaMark(x: .value("Ply", move.ply + 1),
-                         yStart: .value("Level", 50),
-                         yEnd: .value("White", Scoring.winPercent(move.scoreAfter)))
-                    .foregroundStyle(Color.white.opacity(0.08))
-                    .interpolationMethod(.monotone)
-            }
-            ForEach(moves) { move in
-                LineMark(x: .value("Ply", move.ply + 1),
-                         y: .value("White", Scoring.winPercent(move.scoreAfter)))
-                    .foregroundStyle(Palette.ink.opacity(0.85))
-                    .lineStyle(StrokeStyle(lineWidth: 1.6))
-                    .interpolationMethod(.monotone)
-            }
-            ForEach(moves.filter { review.isError($0) && $0.mover == review.playerColor }) { move in
-                PointMark(x: .value("Ply", move.ply + 1),
-                          y: .value("White", Scoring.winPercent(move.scoreAfter)))
-                    .foregroundStyle(review.severity(of: move)?.color ?? Palette.blunder)
-                    .symbolSize(30)
-            }
-            if review.ply > 0 {
-                RuleMark(x: .value("Selected", review.ply))
-                    .foregroundStyle(Palette.brand)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
-            }
-        }
-        .chartYScale(domain: 0...100)
-        .chartXScale(domain: 0...max(1, review.moves.count))
-        .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
-        .chartPlotStyle { $0.padding(.zero) }
-        .frame(height: 40)
-        .chartOverlay { proxy in
-            GeometryReader { geometry in
-                Rectangle().fill(Color.clear).contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                        guard let frame = proxy.plotFrame else { return }
-                        let x = value.location.x - geometry[frame].origin.x
-                        if let ply: Double = proxy.value(atX: x) {
-                            go(to: Int(ply.rounded()))
-                        }
-                    })
-            }
+        EvaluationGraph(points: review.graphPoints,
+                        plyCount: max(1, review.moves.count),
+                        markers: review.graphMarkers,
+                        phases: review.showsLabels ? review.graphPhases : [],
+                        showsPhaseLabels: review.isSummary,
+                        ticks: review.graphTicks,
+                        lowTimeFrom: review.lowTimePly,
+                        selectedPly: review.boardPly) { ply in
+            if ply != review.ply { go(to: ply) }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Evaluation graph, White's winning chances move by move")
         .accessibilityValue(graphSummary)
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: step(1)
+            case .decrement: step(-1)
+            @unknown default: break
+            }
+        }
     }
 
     private var graphSummary: String {
-        guard let last = review.analysis?.moves.last else { return "No evaluations." }
+        guard let last = review.shownMoves.last else { return "No evaluations." }
         let final = "Final evaluation \(last.scoreAfter.accessibleText)"
         guard review.hasDeepReview else { return final }
         let errors = (review.analysis?.moves ?? []).filter { review.isError($0) && $0.mover == review.playerColor }
@@ -831,15 +1130,22 @@ struct GameReviewScreen: View {
     private var moveStrip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    moveChip(index: 0, label: "Start", marker: nil, isSelected: review.ply == 0)
+                HStack(alignment: .top, spacing: 4) {
+                    moveChip(index: 0, label: "Start", marker: nil, caption: nil, isSelected: review.ply == 0)
                     ForEach(Array(review.sanMoves.enumerated()), id: \.offset) { index, san in
-                        let analysed = review.analysis?.moves.first { $0.ply == index }
+                        let analysed = review.shownMoves.first { $0.ply == index }
                         moveChip(index: index + 1,
                                  label: "\(index % 2 == 0 ? "\(index / 2 + 1)." : "")\(san)",
                                  marker: review.isBook(ply: index) ? .book : marker(for: analysed),
+                                 caption: caption(forMove: index, analysed: analysed),
                                  isSelected: review.ply == index + 1)
                             .id(index + 1)
+                    }
+                    if review.lastPly > review.moves.count {
+                        moveChip(index: review.lastPly, label: "Summary", marker: .summary, caption: nil,
+                                 isSelected: review.isSummary)
+                            .id(review.lastPly)
+                            .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .leading)))
                     }
                 }
                 .padding(.vertical, 2)
@@ -848,7 +1154,7 @@ struct GameReviewScreen: View {
                 withAnimation(.smooth(duration: 0.3)) { proxy.scrollTo(max(1, value), anchor: .center) }
             }
             // Finished analysis adds markers that widen the chips: keep the current move centred.
-            .onChange(of: "\(review.hasReview)|\(review.hasDeepReview)") { _, _ in
+            .onChange(of: "\(review.hasReview)|\(review.hasDeepReview)|\(review.isShowingPartial)") { _, _ in
                 withAnimation(.smooth(duration: 0.3)) { proxy.scrollTo(max(1, review.ply), anchor: .center) }
             }
             .onAppear { proxy.scrollTo(max(1, review.ply), anchor: .center) }
@@ -859,76 +1165,132 @@ struct GameReviewScreen: View {
     private enum ChipMarker: Equatable {
         /// Which way the move moved the evaluation bar for the side that played it.
         case trend(EvalTrend)
-        /// A deep review's label on one of the tracked player's moves.
-        case severity(Severity)
+        /// A deep review's label on one of the tracked player's moves; a missed chance adds a
+        /// dashed ring.
+        case severity(Severity, missedChance: Bool)
+        /// The opponent's error, quieter: it is the player's chance, not their mistake.
+        case opponentSeverity(Severity)
+        /// The player took the opponent's error.
+        case punished
         /// Known opening theory, for either side.
         case book
+        case summary
 
         var accessibilityText: String {
             switch self {
             case .trend(let trend): return trend.label
-            case .severity(let severity): return severity.label
+            case .severity(let severity, let missed): return severity.label + (missed ? ", missed chance" : "")
+            case .opponentSeverity(let severity): return "opponent's \(severity.label.lowercased())"
+            case .punished: return "punished"
             case .book: return "book move"
+            case .summary: return "game summary"
             }
         }
     }
 
-    /// A deep review marks the tracked player's errors; a quicker review marks every move's trend.
+    /// A deep review marks errors for both sides and the chances taken; a quicker review marks
+    /// every move's trend.
     private func marker(for move: MoveAnalysis?) -> ChipMarker? {
         guard let move else { return nil }
-        if review.hasDeepReview {
-            guard move.mover == review.playerColor, let severity = review.severity(of: move) else { return nil }
-            return .severity(severity)
+        if review.showsLabels {
+            if let severity = review.severity(of: move) {
+                return move.mover == review.playerColor
+                    ? .severity(severity, missedChance: review.insights.moments[move.ply] == .missedChance)
+                    : .opponentSeverity(severity)
+            }
+            return review.insights.moments[move.ply] == .punished ? .punished : nil
         }
         return move.trend == .level ? nil : .trend(move.trend)
     }
 
-    private func moveChip(index: Int, label: String, marker: ChipMarker?, isSelected: Bool) -> some View {
+    /// The move's time under its chip: a fast error in the mistake colour, a long think in
+    /// amber, the player's moves once short of time in red.
+    private func caption(forMove index: Int, analysed: MoveAnalysis?) -> (text: String, tint: Color)? {
+        guard let clock = review.clock, let spent = clock.spent[index] else { return nil }
+        let isPlayer = (index % 2 == 0) == (review.playerColor == .white)
+        let tint: Color
+        if isPlayer, spent <= 5, analysed.flatMap(review.severity(of:)) != nil { tint = Palette.mistake }
+        else if spent >= 60 { tint = Palette.brand }
+        else if isPlayer, let low = review.lowTimePly, index + 1 >= low { tint = Palette.blunder }
+        else { tint = Palette.inkTertiary }
+        return (GameClock.formatSpent(spent), tint)
+    }
+
+    private func moveChip(index: Int, label: String, marker: ChipMarker?, caption: (text: String, tint: Color)?,
+                          isSelected: Bool) -> some View {
         Button {
             go(to: index)
         } label: {
-            HStack(spacing: 3) {
-                Text(label)
-                    .font(.footnote.weight(isSelected ? .semibold : .regular))
-                switch marker {
-                case .trend(let trend):
-                    Image(systemName: trend.symbol)
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(isSelected ? Palette.onBrand : trend.color)
-                case .severity(let severity):
-                    Text(severity.marker)
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(isSelected ? Palette.onBrand : severity.color)
-                case .book:
-                    Image(systemName: "book.fill")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(isSelected ? Palette.onBrand : Palette.book)
-                case nil:
-                    EmptyView()
+            VStack(spacing: 1) {
+                HStack(spacing: 3) {
+                    Text(label)
+                        .font(.footnote.weight(isSelected ? .semibold : .regular))
+                    switch marker {
+                    case .trend(let trend):
+                        Image(systemName: trend.symbol)
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(isSelected ? Palette.onBrand : trend.color)
+                    case .severity(let severity, let missed):
+                        Text(severity.marker)
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(isSelected ? Palette.onBrand : severity.color)
+                        if missed {
+                            Circle()
+                                .strokeBorder(isSelected ? Palette.onBrand : Palette.brand,
+                                              style: StrokeStyle(lineWidth: 1, dash: [1.6, 1.2]))
+                                .frame(width: 6, height: 6)
+                        }
+                    case .opponentSeverity(let severity):
+                        Text(severity.marker)
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(isSelected ? Palette.onBrand : severity.color.opacity(0.55))
+                    case .punished:
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(isSelected ? Palette.onBrand : Palette.best)
+                    case .book:
+                        Image(systemName: "book.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(isSelected ? Palette.onBrand : Palette.book)
+                    case .summary:
+                        Image(systemName: "chart.bar.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(isSelected ? Palette.onBrand : Palette.brand)
+                    case nil:
+                        EmptyView()
+                    }
                 }
-            }
-            .foregroundStyle(isSelected ? Palette.onBrand : Palette.ink)
-            .padding(.horizontal, 11)
-            .frame(minHeight: 32)
-            .background {
-                if isSelected {
-                    Capsule().fill(Palette.brand)
-                        .matchedGeometryEffect(id: "selected-move", in: chipSelection)
-                } else {
-                    Capsule().fill(Color.white.opacity(0.07))
+                .foregroundStyle(isSelected ? Palette.onBrand : Palette.ink)
+                .padding(.horizontal, 11)
+                .frame(minHeight: 32)
+                .background {
+                    if isSelected {
+                        Capsule().fill(Palette.brand)
+                            .matchedGeometryEffect(id: "selected-move", in: chipSelection)
+                    } else {
+                        Capsule().fill(Color.white.opacity(0.07))
+                    }
+                }
+                if review.clock != nil {
+                    Text(caption?.text ?? " ")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(caption?.tint ?? Palette.inkTertiary)
+                        .frame(height: 11)
                 }
             }
             .frame(minHeight: Layout.minimumTarget)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(label + (marker.map { ", \($0.accessibilityText)" } ?? ""))
+        .accessibilityLabel(label + (marker.map { ", \($0.accessibilityText)" } ?? "")
+                            + (caption.map { ", \($0.text)" } ?? ""))
     }
 
     // MARK: Controls
 
     /// Its own row under the review, never over it: step back at the far left, forward at the far
-    /// right, and the jump between mistakes well clear of both in the middle, so a thumb aimed
+    /// right, and the jump between key moments well clear of both in the middle, so a thumb aimed
     /// at one never lands on another.
     private var controls: some View {
         HStack(spacing: 12) {
@@ -937,7 +1299,7 @@ struct GameReviewScreen: View {
             Spacer(minLength: 0)
             Group {
                 if review.hasDeepReview {
-                    mistakeButton
+                    keyMomentButton
                 } else {
                     Text(review.currentMoveLabel)
                         .font(.footnote.weight(.semibold))
@@ -949,7 +1311,7 @@ struct GameReviewScreen: View {
             }
             Spacer(minLength: 0)
             stepButton(by: 1, symbol: "chevron.right", label: "Next move",
-                       isDisabled: review.ply >= review.moves.count)
+                       isDisabled: review.ply >= review.lastPly)
         }
         .buttonStyle(.plain)
         .foregroundStyle(Palette.ink)
@@ -974,36 +1336,32 @@ struct GameReviewScreen: View {
         .buttonRepeatBehavior(.enabled)
     }
 
-    /// Next mistake while there is one, then previous; both stay reachable from the menu.
-    @ViewBuilder
-    private var mistakeButton: some View {
-        let forward = review.hasNextError
-        let enabled = review.hasNextError || review.hasPreviousError
-        let title = enabled ? (forward ? "Next mistake" : "Previous mistake")
-            : (review.errorPlies.isEmpty ? "No mistakes" : "The only mistake")
+    /// The player's errors and the chances they took, one after another, then the summary and
+    /// back to the start. The previous one stays reachable from the menu.
+    private var keyMomentButton: some View {
         Button {
-            withAnimation(stepAnimation) {
-                if forward { review.goToNextError() } else { review.goToPreviousError() }
-            }
+            go(to: review.nextKeyPly)
         } label: {
-            Text(title)
+            Text(review.nextKeyTitle)
                 .font(.footnote.weight(.semibold))
-                .foregroundStyle(enabled ? Palette.onBrand : Palette.inkSecondary)
+                .foregroundStyle(Palette.onBrand)
                 .padding(.horizontal, 16)
                 .frame(height: Layout.minimumTarget)
-                .background(Capsule().fill(enabled ? Palette.brand : Color.white.opacity(0.08)))
+                .background(Capsule().fill(Palette.brand))
                 .contentTransition(.interpolate)
+                .animation(.smooth(duration: 0.3), value: review.nextKeyTitle)
                 .contentShape(Rectangle())
         }
-        .disabled(!enabled)
         .contextMenu {
-            Button("Previous mistake", systemImage: "chevron.backward.2") { review.goToPreviousError() }
-                .disabled(!review.hasPreviousError)
-            Button("Next mistake", systemImage: "chevron.forward.2") { review.goToNextError() }
-                .disabled(!review.hasNextError)
+            Button("Previous key moment", systemImage: "chevron.backward.2") {
+                if let ply = review.previousKeyPly { go(to: ply) }
+            }
+            .disabled(review.previousKeyPly == nil)
+            Button("Summary", systemImage: "chart.bar") { go(to: review.lastPly) }
         }
-        .accessibilityAction(named: "Previous mistake") { review.goToPreviousError() }
-        .accessibilityAction(named: "Next mistake") { review.goToNextError() }
+        .accessibilityAction(named: "Previous key moment") {
+            if let ply = review.previousKeyPly { go(to: ply) }
+        }
     }
 }
 

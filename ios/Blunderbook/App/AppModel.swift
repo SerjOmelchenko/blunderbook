@@ -24,6 +24,7 @@ final class AppModel {
     let games: GameRepository
     let analyses: AnalysisRepository
     let statistics: StatisticsRepository
+    let mistakeBook: MistakeBookRepository
     let queue: QueueRepository
     let telemetry: AnalysisTelemetry
     let preferences: PreferencesRepository
@@ -47,6 +48,12 @@ final class AppModel {
     /// The one game Mistakes is narrowed to, after its accuracy rings were tapped in Games. Not
     /// kept between launches.
     var mistakesGameKey: String?
+    /// A kind of mistake to narrow Mistakes to as it opens, from a review's repeat count. Taken
+    /// by the Mistakes screen and cleared.
+    var mistakesKind: MistakeCategory?
+    /// A screen to push on the current tab, from a view without a link of its own (a swipe
+    /// action, a session button). Taken by the root view and cleared.
+    var pendingRoute: Route?
     var isRefreshing = false
     var refreshProgress: RefreshProgress?
     var refreshError: ProviderError?
@@ -75,7 +82,12 @@ final class AppModel {
     var scope: PlanScope { entitlement.state.scope }
     var isPremium: Bool { entitlement.state.isPremium }
     /// The Mistakes tab is Premium. Free, it shows a lock and opens a preview of itself instead.
-    var isMistakesLocked: Bool { !entitlement.unlocksPremiumFeatures }
+    var isMistakesLocked: Bool {
+        #if DEBUG
+        if DevelopmentSeed.unlocksMistakes { return false }
+        #endif
+        return !entitlement.unlocksPremiumFeatures
+    }
 
     // MARK: - Boot
 
@@ -103,6 +115,7 @@ final class AppModel {
         games = GameRepository(database: database)
         analyses = AnalysisRepository(database: database)
         statistics = StatisticsRepository(database: database)
+        mistakeBook = MistakeBookRepository(database: database)
         queue = QueueRepository(database: database)
         telemetry = AnalysisTelemetry(directory: Self.databaseDirectory().appendingPathComponent("Telemetry", isDirectory: true))
         preferences = PreferencesRepository(database: database)
@@ -182,7 +195,10 @@ final class AppModel {
         }
         // Extra engines load on their own threads the first time each has a game; the networks
         // they load are shared, so each costs about 50 MB.
-        if let engine { coordinator.start(engine: engine, makeEngine: { StockfishEngine() }) }
+        if let engine {
+            coordinator.start(engine: engine, makeEngine: { StockfishEngine() },
+                              cache: PositionCache(repository: PositionCacheRepository(database: database)))
+        }
         Task {
             // Entitlement arrives asynchronously; the queue learns about it as soon as it does.
             while !Task.isCancelled {
@@ -401,78 +417,125 @@ final class AppModel {
     enum ReviewRefusal: Equatable {
         case engineUnavailable(String)
         case noPlayer
+        /// Another game is waiting or being analysed; only one is analysed at a time.
+        case anotherGameAnalysing
     }
 
-    /// Queues a single review, or with `deep` a deep review. Analysing a game you open is free on
-    /// every plan, deep or not.
+    /// True while any game waits for or is having its analysis. One game is analysed at a time,
+    /// so nothing else can be started until it finishes.
+    var isAnalysingAGame: Bool { coordinator.counts.pending + coordinator.counts.running > 0 }
+
+    /// Queues a single review, or with `deep` a deep review. Analysing a game is free on every
+    /// plan, deep or not. Refused while another game is analysed: one game at a time.
     @discardableResult
     func requestReview(gameKey: String, deep: Bool = false) -> ReviewRefusal? {
         guard let player = selectedPlayer else { return .noPlayer }
         if let engineError { return .engineUnavailable(engineError) }
-        try? coordinator.requestReview(playerID: player.id, gameKey: gameKey, deep: deep)
+        // Read from the queue, not `coordinator.counts`, which catches up a moment later.
+        let busy = ((try? queue.counts()).map { $0.pending + $0.running } ?? 0) > 0
+        if busy, ((try? queue.activeItem(gameKey: gameKey)) ?? nil) == nil { return .anotherGameAnalysing }
+        _ = try? coordinator.requestReview(playerID: player.id, gameKey: gameKey, deep: deep)
         touch()
         return nil
     }
 
-    /// Queues in-depth analyses of several games at once, such as today's. Like any game opened
-    /// on its own, these are free; only the hundred-game batch is Premium.
+    // MARK: - Opening a game when its analysis lands
+
+    /// A game whose analysis was started in place: from its rings in Games or a row on
+    /// Analytics. If the person is not touching
+    /// the screen when the analysis lands, you fly through the rings into the game
+    /// (`RevealPortal`): the row's rings if they are on screen, otherwise the bottom bar's.
+    struct PendingReveal {
+        var gameKey: String
+    }
+
+    /// The flight from a set of rings into the game, while it plays.
+    struct Reveal: Equatable {
+        var gameKey: String
+        /// The rings' centre, in global coordinates.
+        var origin: CGPoint
+        /// The accuracies the rings settle on: this game, 30 days, 12 months.
+        var values: [Double]
+        /// When the rings stopped spinning, to pick them up at the same angles.
+        var spunAt: Date
+        /// From the bottom bar's rings rather than the row's: the bar stays up, rings hidden,
+        /// until the screen is photographed.
+        var fromBar: Bool
+        /// The rings' size on screen against the row's 40 points: the bar shows them smaller.
+        var ringScale: CGFloat
+        /// The tab whose stack the game opens on: the one on screen.
+        var tab: RootTab
+        /// Set once the photo of the screen covers it: the bottom bar can go.
+        var isCovered = false
+        /// Set by the game's screen once it is on screen behind the photo of the list, so the
+        /// flight never opens onto an empty screen.
+        var hasArrived = false
+    }
+
+    @ObservationIgnored var pendingReveal: PendingReveal?
+    /// When a finger last went down anywhere in the app (`TouchActivityMonitor`).
+    @ObservationIgnored var lastTouchAt = Date.distantPast
+    /// Kept by the root view: true while Games shows its list rather than a pushed screen.
+    @ObservationIgnored var isGamesListShowing = true
+    /// Kept by the root view: true while a game (or a puzzle or explore) is open on the tab on
+    /// screen. The bottom bar hides over a game, so then there are no rings to fly through.
+    @ObservationIgnored var isGameOnScreen = false
+    /// Where the pending game's row rings are on screen, kept by the row while it is laid out.
+    @ObservationIgnored var rowRingsFrame: (gameKey: String, frame: CGRect)?
+    /// Where the bottom bar's rings are on screen, kept by the bar.
+    @ObservationIgnored var barRingsFrame: CGRect?
+    var reveal: Reveal?
+
+    /// How long the screen must have gone untouched for the game to open on its own: a person
+    /// scrolling or tapping is never pulled away mid-gesture.
+    static let revealIdle: TimeInterval = 2
+
+    /// Starts a game's analysis in place (its rings in Games, a row on Analytics), to be opened
+    /// when it lands.
     @discardableResult
-    func requestReviews(gameKeys: [String]) -> ReviewRefusal? {
-        guard let player = selectedPlayer else { return .noPlayer }
-        if let engineError { return .engineUnavailable(engineError) }
-        for key in gameKeys {
-            try? coordinator.requestReview(playerID: player.id, gameKey: key, deep: true)
+    func analyseThenOpen(gameKey: String) -> ReviewRefusal? {
+        let refusal = requestReview(gameKey: gameKey, deep: true)
+        pendingReveal = refusal == nil ? PendingReveal(gameKey: gameKey) : nil
+        return refusal
+    }
+
+    /// Called whenever the queue's counts change. Once the pending game's analysis has landed,
+    /// opens it if nobody is touching the screen: from the row's rings when they are on screen
+    /// in Games, otherwise from the bottom bar's. A failed analysis, a sheet, a game already
+    /// open, the app in the background or VoiceOver (whose gestures never reach the app) all
+    /// leave it where it is.
+    func revealIfLanded() {
+        guard let pending = pendingReveal, reveal == nil,
+              ((try? queue.activeItem(gameKey: pending.gameKey)) ?? nil) == nil else { return }
+        pendingReveal = nil
+        guard let player = selectedPlayer,
+              let entry = (try? games.entry(playerID: player.id, gameKey: pending.gameKey)) ?? nil,
+              entry.hasDeepReview, let accuracy = entry.accuracy,
+              Date().timeIntervalSince(lastTouchAt) >= Self.revealIdle,
+              UIApplication.shared.applicationState == .active,
+              !UIAccessibility.isVoiceOverRunning,
+              !Self.isPresentingSheet else { return }
+        let values = [accuracy, entry.accuracy30Days ?? 0, entry.accuracy12Months ?? 0]
+        let screen = Self.keyWindow?.bounds ?? .zero
+        if selectedTab == .games, isGamesListShowing,
+           let row = rowRingsFrame, row.gameKey == pending.gameKey, screen.contains(row.frame) {
+            reveal = Reveal(gameKey: pending.gameKey, origin: CGPoint(x: row.frame.midX, y: row.frame.midY),
+                            values: values, spunAt: Date(), fromBar: false, ringScale: 1, tab: selectedTab)
+        } else if !isGameOnScreen, let bar = barRingsFrame, screen.intersects(bar) {
+            reveal = Reveal(gameKey: pending.gameKey, origin: CGPoint(x: bar.midX, y: bar.midY),
+                            values: values, spunAt: Date(), fromBar: true,
+                            ringScale: QueueAccessory.ringScale, tab: selectedTab)
         }
-        touch()
-        return nil
     }
 
-    /// Analysing a hundred games in one go is the Premium feature.
-    var canAnalyseInBulk: Bool { isPremium }
-
-    /// How many games one bulk run takes on.
-    nonisolated static let bulkBatchSize = 100
-
-    /// What a bulk run would cover right now: the most recent games of the time class being
-    /// viewed that have no in-depth review, up to `bulkBatchSize`. The next run carries on further
-    /// back.
-    struct BulkPlan {
-        var eligible: [String] = []
-        /// Games of the time class with no in-depth review, this batch included.
-        var unreviewed = 0
-
-        init() {}
-
-        init(unreviewedNewestFirst keys: [String]) {
-            eligible = Array(keys.prefix(AppModel.bulkBatchSize))
-            unreviewed = keys.count
-        }
+    private static var keyWindow: UIWindow? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
     }
 
-    func bulkPlan() -> BulkPlan {
-        guard let player = selectedPlayer else { return BulkPlan() }
-        let all = (try? games.eligibleKeys(playerID: player.id, scope: scope, timeClass: filters.timeClass)) ?? []
-        return BulkPlan(unreviewedNewestFirst: (try? analyses.withoutDeepReview(all)) ?? [])
-    }
-
-    /// Queues in-depth reviews of the games in the plan. Premium only; returns how many games
-    /// were queued.
-    @discardableResult
-    func startBulk() -> Int {
-        guard canAnalyse, canAnalyseInBulk, let player = selectedPlayer else { return 0 }
-        let keys = bulkPlan().eligible
-        guard !keys.isEmpty else { return 0 }
-        do {
-            try coordinator.enqueueBulk(playerID: player.id,
-                                        label: "\(player.displayUsername) · \(filters.timeClass.label) · previous \(keys.count)",
-                                        gameKeys: keys)
-            coordinator.resume()
-        } catch {
-            return 0
-        }
-        touch()
-        return keys.count
-    }
+    private static var isPresentingSheet: Bool { keyWindow?.rootViewController?.presentedViewController != nil }
 
     // MARK: - Change notification
 

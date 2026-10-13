@@ -41,9 +41,8 @@ Use a tested GPL-compatible chess-rules implementation supporting castling, en p
 |---|---|---|
 | Tracked public players | 1 (a Chess.com and a Lichess account count as two) | Unlimited |
 | Analyse a game you open | Yes | Yes |
-| Review depth (deep-v1 confirmation budget) | Depth 19 and 23 | Also depth 26 and 29 |
+| Review depth (deep-v1 nodes per position) | Quick and Standard | Also Deep and Deepest |
 | Mistakes tab (W12) and drills (W14) | Locked: tab shows a lock; tapping opens a preview with sample games (W12a) | Yes |
-| Analyze previous 100 games | Opens plan screen | The 100 most recent games without a deep review, each deep-reviewed (deep-v1); run again to go further back |
 | View saved reviews, including older games | Yes | Yes |
 | Export/import | Yes | Yes |
 
@@ -53,7 +52,7 @@ Downgrades never delete anything: players tracked beyond the free limit are kept
 
 Every plan covers the whole downloaded history; there is no free game window. One Apple purchase unlocks all locally tracked players, not a particular Chess.com account.
 
-When entitlement expires, pause bulk at the next safe stop/checkpoint, retain results and pending work, recalculate free aggregate scope. Renewal removes the entitlement pause; continuation requires no manual pause and no other blocking reason. Individual reviews remain allowed in the free window. Restoring purchases restores premium access, not profiles, games, reviews or queue progress.
+Removed 2026-10-12: there is no batch analysis ("Analyze previous 100 games") on any plan; games are analyzed one at a time. When entitlement expires, retain results and pending work and recalculate free aggregate scope. Individual reviews remain allowed. Restoring purchases restores premium access, not profiles, games, reviews or queue progress.
 
 Read verified current entitlements at launch and listen for updates. Subscribed and verified grace-period access are premium. Expired/revoked/refunded access is free; billing retry alone is not premium. Offline, honor a previously verified entitlement only through its known valid-through date. Unknown status shows “Checking subscription,” preserves all saved reviews and pauses purchase-dependent work. Pending purchase stays pending; user dismissal is not an error. Offer Restore Purchases, system Manage Subscription, privacy and terms. Backups cannot grant entitlements.
 
@@ -86,13 +85,37 @@ are removed, and so are the confirmation searches that existed to make those lab
 ### Deep review (deep-v1)
 
 Added 2026-10-08: a game the person opens can be deep-reviewed on request, free on every plan. It
-runs the former standard-v2 method on that game: every position at 100,000 nodes, both positions
-around a candidate error (loss ≥ 5 points, mate appearing/disappearing, or improvement > 5)
-re-searched at the review depth chosen in Settings (500k, 2M — the default since 2026-10-10 — 5M or 10M
-nodes; a new choice applies to reviews run after it), then per move loss, accuracy, severity (5/10/20 thresholds), phase,
+searches every position of the game once, at the review depth chosen in Settings, and scores each move
+from the two searches around it (the engine's own choice loses nothing): loss, accuracy, severity (5/10/20 thresholds), phase,
 evidence-based pattern tags, consequence, explanation and the engine's best move and line, plus each
 colour's game accuracy. Opening a game in the review starts its deep review automatically when it has none (updated 2026-10-08: there is no separate quick analysis of a single game). A deep review replaces a standard review of the game; a standard analysis
 never replaces a deep review. The Mistakes tab counts the tracked player's moves in deep reviews only.
+
+#### Review depth (changed 2026-10-12)
+
+Every position gets the same node budget, the way Lichess analyses a game (about 1.5M nodes a
+position); there is no quick first pass and no confirmation search. The person picks the level in
+Settings → Review depth, and a new choice applies to reviews run after it:
+
+| Level | Nodes per position | Plan |
+|---|---|---|
+| Quick | 500,000 | Free |
+| Standard (default) | 1,500,000 | Free |
+| Deep | 3,000,000 | Premium |
+| Deepest | 6,000,000 | Premium |
+
+Without Premium a saved Deep or Deepest choice runs at Standard. Each row shows the budget, the median
+depth it reaches (19 / 22 / 25 / 28 on a 59-move game; depth depends only on the budget) and the time
+for a 40-move game on one core of an iPhone 16 Pro (about 40 s / 2 / 4 / 8 min; measured at 500k, 2M
+and 5M, the rest in proportion).
+
+Why: until 2026-10-12 every position got a 100k search (about depth 15) and only moves that looked
+like errors were searched again deeper. A 100k search often misjudges both positions around an error
+the same way, so the error was never re-searched; on one rapid game that left 13.exd6, 13...Qxd6,
+15.Qc4 and 52.b5 unlabelled. Measured on 9 real games against 8M-node searches, which found 158
+errors: the old method found 122 (89 with the same severity), 500k on every position 136 (100), 1.5M
+141 (113), 2M 144 (122). Reviews made before keep their labels and their stored `confirmed` flags;
+levels saved as "fast" or "balanced" fall back to Standard.
 
 #### Accuracy (scoring winpct-2026)
 
@@ -145,6 +168,8 @@ the list names traps such as Fool's Mate. Book status is derived from the moves,
 - Use exact terminal scores for legal checkmate/stalemate/automatic draw; otherwise preserve engine mate distances. Never represent a win on time as checkmate.
 - Stop on cancellation or interruption; an interrupted game is analyzed again from its first move. Never store a partial search. A 30-second engine-response watchdog (three minutes for efficiency-core searches, which the system may starve while the phone is busy) stops the search and restarts the game once; repeated failure marks the game failed and continues other work. Budget changes require a new policy ID.
 - Zero moves yields No moves to analyze. Do not skip book/forced moves or exclude short games.
+- Added 2026-10-12, position cache: a deep review takes the search of any position in the first 16 moves of a game from the standard start from the cache instead of searching it, keyed by the exact moves, the engine signature (engine, network, settings) and the level's budget. Because every search starts from a cleared engine with a fixed budget, a cached search is the search the engine would make, and the review is identical. Two sources: `OpeningEvaluations.tsv`, bundled, every position of the named openings up to 16 moves (7,752) searched in advance by the app's own engine at Quick and Standard (built by `OpeningEvaluationsBuilder`; ignored for any other engine; Deep and Deepest rely on the device cache), and the `position_cache` table, which keeps the first 16 moves' searches of every game this device reviews. Measured on 9,831 rapid games: named lines cover 98% of positions after one move, 38% after three, 5% after five; a player's own earlier games cover 85% after two moves and 33% after five. The table is cleared with the last tracked player. Evaluations from other sources (such as Lichess's cloud database) are not used: a review must never mix two engines' evaluations, which would put a step in the graph and could mislabel the move where they meet (decided 2026-10-12).
+- Added 2026-10-12, review order and progress: a review searches the positions with most material first (the slowest), and an efficiency-core engine stops taking positions once no more remain than performance-core engines. Each move is scored as soon as both positions around it are searched, and the review the person opened shows those moves (labels, graph, bar, arrows) while the rest runs. Accuracy and the Mistakes backlog wait for the finished review, and nothing is saved before it.
 - When a position is shown, search it live, deeper (400,000 nodes), for Stockfish's three best lines. These are shown, never stored.
 
 ### Evaluation bar
@@ -164,7 +189,7 @@ Persist engine, net and policy versions. Any complete review counts, whatever it
 
 ## 7. Queue and device behavior
 
-One performance-core engine handles manual reviews, and bulk while the phone is cool; up to one engine per efficiency core (at most four) handles bulk side by side. Each engine takes one game at a time, claimed atomically so no game runs twice. A bulk batch covers the selected player's eligible history known at start and historical games discovered during that initial download. It does not automatically analyze future new games after completion. Deduplicate `(gameKey, policyID)` jobs; skip matching completed analyses. Multiple players' batches are FIFO, each newest-game-first; a manual review stops any bulk game on the performance-core engine, which returns to pending.
+Changed 2026-10-12, resource limits: engine counts come from the device's own core counts, never from a list of models, and always leave the person one performance core and half the efficiency cores. With P performance and E efficiency cores: `max(1, P − 1)` performance-core engines and `max(1, ⌊E / 2⌋)` efficiency-core engines, at most 8 in all (performance first) and at most one per GiB of memory. An iPhone 16 Pro (2 + 4) runs 1 + 2, an M5 Mac (4 + 6) 3 + 3. A manual review takes every engine: the first performance-core engine takes it, stops any bulk game on the others (those return to pending) and searches the game's positions on all of them at once, the efficiency-core ones at utility priority, below the person's own work; the result is identical to one engine's. Bulk runs one game per engine on the efficiency-core engines, plus the first performance-core engine only while the device is cool and the app is on screen. Low Power Mode, low battery, heat and storage stop work as below. Measured on an M5, 41 positions at Standard: 1 engine 51.9 s at 99% CPU, 3 performance-core engines 21.9 s at 292%, the full allowance (3 + 3) 16.1 s at 571%; all ten cores at top priority had taken 14.8–18.3 s at about 1000%. Each engine takes one game at a time, claimed atomically so no game runs twice. A bulk batch covers the selected player's eligible history known at start and historical games discovered during that initial download. It does not automatically analyze future new games after completion. Deduplicate `(gameKey, policyID)` jobs; skip matching completed analyses. Multiple players' batches are FIFO, each newest-game-first; a manual review stops every bulk game, which returns to pending.
 
 Item states: pending → running → completed/failed. Interrupted item returns to pending and restarts from its first move. Queue blockers are a **set**: user, thermal, battery, lowPower, entitlement, storage, system. Processing requires all applicable blockers cleared; one clearing cannot override another. Highest-priority reason is displayed with other reasons discoverable.
 
@@ -172,8 +197,8 @@ Item states: pending → running → completed/failed. Interrupted item returns 
 |---|---|
 | Pause | Persist progress; only explicit Resume clears user pause. |
 | Cancel | Confirm, remove pending batch items, keep completed reviews. A new batch skips completed work. |
-| Manual review | Stop the performance-core engine's bulk game, analyze the selected game there, then return if unblocked. |
-| Fair thermal | Performance-core engine stops taking bulk; efficiency-core engines continue. |
+| Manual review | Analyze the selected game on all engines at once. While the device is warm (fair or worse), every engine searches at utility priority, which keeps the work on the cooler efficiency cores; back to full speed once nominal. A review stopped part way (heat, leaving the app) keeps its searches in memory for the session and carries on from them, so it never restarts into the same heat (changed 2026-10-13: a 128-move game had looped between Hot stops and restarts). |
+| Fair thermal | The performance-core engine stops taking bulk; efficiency-core engines continue. |
 | Serious/critical thermal | Pause all engine work. Resume eligible bulk after nominal/fair state remains stable for 60 seconds. Each such episode while analyzing removes one efficiency-core engine (minimum one); one returns after 20 unbroken nominal minutes. |
 | Battery <=20%, unplugged | Pause bulk. Recover at >=30% or charging. Unknown battery level is not invented. |
 | Low Power Mode | Pause bulk until disabled. Foreground individual reviews allowed unless thermally blocked. |
@@ -203,7 +228,6 @@ First launch with no player opens Welcome. Otherwise restore selected player/tab
 | W09 | Game review | Select move/graph; next/previous error; flip; continuation |
 | W10 | Continuation | Actual / Better line; step ply; return |
 | W11 | Individual analysis | Progress; stop; completed review; retry |
-| W14 | Bulk preparation | Estimate; start; dismiss; upgrade |
 | W15 | Queue | Pause/resume/cancel; retry failed; completed reviews |
 | W16 | Premium plan | Subscribe; restore; legal links; dismiss |
 | W17 | Subscription | System manage; restore; renew |
@@ -263,7 +287,7 @@ Wireframes use restrained monochrome structure and one accent; final branding re
 3. Short/timeout/abandoned games count and score normally. Zero-move game counts with nothing to evaluate. Bad PGN is visible without fabricated metrics.
 4. White/Black sign tests are symmetric; exact best move gets zero loss; mate-to-mate is not a missed mate; recorded result does not replace evaluation.
 5. Termination loses at most the games in progress, which restart; completed games are kept; unfinished game never publishes final metrics. Multiple pause reasons compose correctly.
-6. Free bulk is unavailable. Expiry/pending/cancellation/grace/refund/offline/restore follow §3; no imported data grants access.
+6. Expiry/pending/cancellation/grace/refund/offline/restore follow §3; no imported data grants access.
 7. Backup round-trip retains source and all completed results/provenance. Invalid/canceled import leaves existing database unchanged.
 8. Offline cache loads without network. Provider errors retain data/timestamps. Unsupported/ongoing games never enter engine work.
 9. 50,000-game fixture uses paged lists and incremental summaries. Record measured timing/memory/storage/thermals on an oldest-supported and a recent physical phone before release.

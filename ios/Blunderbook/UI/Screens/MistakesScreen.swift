@@ -11,26 +11,34 @@ import SwiftUI
 
 // MARK: - W12 Mistakes
 
-/// Every error across the player's deep-reviewed games in one list, newest first. Each card
-/// carries labels saying what kind of mistake it was and opens it as a puzzle; a solved one
-/// carries a green check. The labels above the list narrow it to one kind in place — there is no
-/// screen per kind. A standard analysis labels nothing, so only deep reviews count here.
+/// Every error across the player's deep-reviewed games, as something to train on: rings for how
+/// the drilling goes and a session button on top, then the biggest leak, the clock and the
+/// opening hot spots, each of which narrows the list in place, then the list itself by week.
+/// A card opens the mistake as a puzzle; a session drills several in a row. Solved mistakes come
+/// back on a schedule (`MistakeSchedule`). A standard analysis labels nothing, so only deep
+/// reviews count here.
 struct MistakesScreen: View {
     @Environment(AppModel.self) private var model
-    @State private var breakdown = ErrorBreakdown()
-    @State private var backlog = MistakeBacklog()
-    @State private var accuracy: Double?
-    @State private var mistakes: [MistakeOccurrence] = []
+    @State private var book = MistakeBook.empty
+    @State private var reviewedGames = 0
+    @State private var hasLoaded = false
     /// The kind the list is narrowed to; nil shows every error.
     @State private var selectedKind: MistakeCategory?
+    @State private var focus: MistakeFocus?
     /// The game the list is narrowed to, from `AppModel.mistakesGameKey`.
     @State private var game: GameListEntry?
+    @State private var ignored: Ignored?
 
-    private static let pageSize = 50
+    private struct Ignored: Equatable {
+        var refs: [MistakeRef]
+        var text: String
+        var id = UUID()
+    }
 
     var body: some View {
+        ScrollViewReader { reader in
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
                 PlayerContextHeader()
 
                 if let game {
@@ -40,173 +48,240 @@ struct MistakesScreen: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
-                if breakdown.games == 0 {
-                    EmptyState(symbol: "magnifyingglass",
-                               title: "No analysed games in this view",
-                               message: "Open any game and it is analysed in depth. Its mistakes land here, ready to solve.")
-                } else {
-                    MistakesContent(breakdown: breakdown, backlog: backlog, accuracy: accuracy,
-                                    mistakes: mistakes, selectedKind: $selectedKind, isOneGame: game != nil,
-                                    canShowMore: mistakes.count >= Self.pageSize && mistakes.count % Self.pageSize == 0,
-                                    showMore: loadMore)
+                if hasLoaded {
+                    if reviewedGames == 0 {
+                        EmptyState(symbol: "magnifyingglass",
+                                   title: "No analysed games in this view",
+                                   message: "Tap a game's rings in Games to analyse it in depth. Its mistakes land here, ready to solve.")
+                    } else {
+                        MistakesContent(book: book, selectedKind: $selectedKind, focus: $focus,
+                                        isOneGame: game != nil,
+                                        navigate: { model.pendingRoute = $0 },
+                                        ignore: ignore)
+                    }
                 }
             }
             .padding(Layout.gutter)
             .padding(.bottom, 60)
         }
         .refreshable { await model.refreshSelectedPlayer() }
+        .task { await DevelopmentScroll.apply(reader) }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let ignored {
+                UndoBar(text: ignored.text) { undo(ignored) }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .task(id: ignored.id) {
+                        try? await Task.sleep(for: .seconds(4))
+                        withAnimation(.smooth(duration: 0.3)) { if self.ignored?.id == ignored.id { self.ignored = nil } }
+                    }
+            }
+        }
         .task(id: taskKey) { load() }
     }
 
     private var taskKey: String {
-        "\(model.selectedPlayer?.id.uuidString ?? "")|\(model.filters)|\(model.scope.rawValue)|\(model.dataVersion)|\(model.coordinator.counts.completed)|\(selectedKind?.id ?? "all")|\(model.mistakesGameKey ?? "")"
+        "\(model.selectedPlayer?.id.uuidString ?? "")|\(model.filters)|\(model.scope.rawValue)|\(model.dataVersion)|\(model.coordinator.counts.completed)|\(model.mistakesGameKey ?? "")|\(model.mistakesKind?.id ?? "")"
     }
 
     // MARK: Loading
 
-    /// Reloads as many as are on screen, so solving one deep in the list keeps the place.
     private func load() {
         guard let player = model.selectedPlayer else { return }
+        // Opened from a review's repeat count: narrowed to that kind of mistake.
+        if let kind = model.mistakesKind {
+            model.mistakesKind = nil
+            selectedKind = kind
+            focus = nil
+        }
         // A game that has gone since, with a changed history or another player, drops the narrowing.
         let gameKey = model.mistakesGameKey
         game = gameKey.flatMap { try? model.games.entry(playerID: player.id, gameKey: $0) }
         if gameKey != nil, game == nil { model.mistakesGameKey = nil; return }
-        breakdown = (try? model.statistics.errorBreakdown(playerID: player.id, filters: model.filters, scope: model.scope,
-                                                          gameKey: gameKey)) ?? ErrorBreakdown()
-        accuracy = (try? model.statistics.averageAccuracy(playerID: player.id, filters: model.filters, scope: model.scope,
-                                                          gameKey: gameKey)) ?? nil
-        let loadedBacklog = (try? model.statistics.mistakeBacklog(playerID: player.id, filters: model.filters, scope: model.scope,
-                                                                   gameKey: gameKey)) ?? MistakeBacklog()
-        // A kind that no longer has errors cannot stay selected.
-        let kind = selectedKind.flatMap { selected in loadedBacklog.kinds.contains { $0.category == selected } ? selected : nil }
-        let loaded = (try? model.statistics.occurrences(playerID: player.id, filters: model.filters, scope: model.scope,
-                                                        category: kind, gameKey: gameKey,
-                                                        limit: max(Self.pageSize, mistakes.count))) ?? []
+        let games = (try? model.statistics.errorBreakdown(playerID: player.id, filters: model.filters, scope: model.scope,
+                                                           gameKey: gameKey))?.games ?? 0
+        let occurrences = (try? model.mistakeBook.occurrences(playerID: player.id, filters: model.filters,
+                                                              scope: model.scope, gameKey: gameKey)) ?? []
+        let loaded = MistakeBook(occurrences: occurrences)
+        // A narrowing that no longer has errors cannot stay.
+        let kind = selectedKind.flatMap { selected in loaded.backlog.kinds.contains { $0.category == selected } ? selected : nil }
+        let keptFocus = focus.flatMap { loaded.count($0) > 0 && gameKey == nil ? $0 : nil }
         // A mistake solved a moment ago gets its check with a little spring.
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-            backlog = loadedBacklog
+        withAnimation(hasLoaded ? .spring(response: 0.45, dampingFraction: 0.8) : nil) {
+            reviewedGames = games
+            book = loaded
             selectedKind = kind
-            mistakes = loaded
+            focus = keptFocus
+            hasLoaded = true
         }
     }
 
-    private func loadMore() {
-        guard let player = model.selectedPlayer else { return }
-        let more = (try? model.statistics.occurrences(playerID: player.id, filters: model.filters, scope: model.scope,
-                                                      category: selectedKind, gameKey: model.mistakesGameKey,
-                                                      offset: mistakes.count)) ?? []
-        mistakes.append(contentsOf: more)
+    // MARK: Ignoring
+
+    private func ignore(_ occurrence: MistakeOccurrence) {
+        let refs = [occurrence.ref] + occurrence.repeats
+        try? model.mistakeBook.setIgnored(refs, true)
+        withAnimation(.smooth(duration: 0.3)) {
+            ignored = Ignored(refs: refs, text: "Ignored \(occurrence.moveNumberLabel) \(occurrence.san)")
+        }
+        model.touch()
+    }
+
+    private func undo(_ ignored: Ignored) {
+        try? model.mistakeBook.setIgnored(ignored.refs, false)
+        withAnimation(.smooth(duration: 0.3)) { self.ignored = nil }
+        model.touch()
     }
 }
 
-/// The backlog itself: the summary tiles, the kinds to narrow by and the list. Shared by the tab
-/// and by its preview on the free plan, which feeds it sample games.
+/// The tab below the player: the session header (or all clear), the biggest leak, the clock,
+/// the openings, the kinds, and the list by week. Shared by the tab and by its preview on the
+/// free plan, which feeds it sample games.
 struct MistakesContent: View {
-    let breakdown: ErrorBreakdown
-    let backlog: MistakeBacklog
-    let accuracy: Double?
-    /// Already narrowed to `selectedKind`.
-    let mistakes: [MistakeOccurrence]
+    let book: MistakeBook
     @Binding var selectedKind: MistakeCategory?
+    @Binding var focus: MistakeFocus?
     /// Narrowed to one game: the figures and the empty state speak of that game.
     var isOneGame = false
-    var canShowMore = false
-    var showMore: () -> Void = {}
+    var navigate: (Route) -> Void
+    /// Nil where mistakes cannot be ignored, as in the preview.
+    var ignore: ((MistakeOccurrence) -> Void)?
+
+    @State private var limit = MistakesContent.pageSize
+    private static let pageSize = 60
+
+    private var shown: [MistakeOccurrence] { book.shown(kind: selectedKind, focus: focus) }
+    /// Changes whenever the list is drawn afresh, so its cards rise in again.
+    private var listKey: String { "\(selectedKind?.id ?? "all")|\(String(describing: focus))" }
 
     var body: some View {
-        summaryTiles
-        if backlog.errors == 0 {
-            EmptyState(symbol: "checkmark.circle",
-                       title: isOneGame ? "No errors in this game" : "No errors in this view",
-                       message: isOneGame ? "Nothing to solve here." : "Within the current player, filters and plan scope.")
+        if book.errors == 0 {
+            AllClearPanel(title: isOneGame ? "No errors in this game" : "No errors in this view",
+                          message: isOneGame ? "Nothing to solve here." : "Within the current player, filters and plan scope.")
         } else {
-            kindFilter
-            mistakeList
-        }
-    }
-
-    private var summaryTiles: some View {
-        StatTileRow {
-            StatTile(label: "Errors", value: backlog.errors.formatted(),
-                     caption: isOneGame ? "in this game" : "in \(breakdown.games) deep review\(breakdown.games == 1 ? "" : "s")")
-            StatTile(label: "Solved", value: backlog.solved.formatted(),
-                     caption: "of \(backlog.errors.formatted()) errors",
-                     tone: backlog.solved > 0 ? Palette.best : Palette.ink)
-            StatTile(label: "Accuracy", value: Format.accuracy(accuracy),
-                     caption: isOneGame ? "this game" : "average per game", ring: accuracy)
-        }
-    }
-
-    // MARK: Kinds
-
-    /// One row of labels, each with its count: tapping one narrows the list to that kind, and
-    /// tapping it again, or All, shows everything.
-    private var kindFilter: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                kindChip(title: "All", count: backlog.errors, isSelected: selectedKind == nil) {
-                    selectedKind = nil
-                }
-                ForEach(backlog.kinds) { kind in
-                    kindChip(title: kind.category.title, count: kind.count,
-                             isSelected: selectedKind == kind.category) {
-                        selectedKind = selectedKind == kind.category ? nil : kind.category
-                    }
-                }
+            header
+            LeakPanel(book: book, selectedKind: $selectedKind, showsTrend: !isOneGame)
+                .id("mistakes-leak")
+            if book.time.timed > 0 {
+                ClockPanel(time: book.time, focus: $focus)
             }
-            .padding(.horizontal, Layout.gutter)
-        }
-        .padding(.horizontal, -Layout.gutter)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Kinds of mistake")
-    }
-
-    private func kindChip(title: String, count: Int, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Text(title)
-                Text(count.formatted())
-                    .monospacedDigit()
-                    .foregroundStyle(isSelected ? Palette.onBrand.opacity(0.7) : Palette.inkTertiary)
+            if !isOneGame, !book.hotSpots.isEmpty || book.repeatedCount > 0 {
+                HotSpotsPanel(spots: book.hotSpots, repeated: book.repeatedCount, focus: $focus)
             }
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(isSelected ? Palette.onBrand : Palette.ink)
-            .padding(.horizontal, 12)
-            .frame(minHeight: 34)
-            .background(Capsule().fill(isSelected ? Palette.brand : Color.white.opacity(0.07)))
-            .frame(minHeight: Layout.minimumTarget)
-            .contentShape(Rectangle())
+            KindChipRow(book: book, selected: $selectedKind, showsTrend: !isOneGame)
+                .id("mistakes-kinds")
+            if let focus {
+                FocusPill(focus: focus, count: shown.count) {
+                    withAnimation(.smooth(duration: 0.3)) { self.focus = nil }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            if let selectedKind {
+                Text(selectedKind.detail)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity)
+                    .id(selectedKind.id)
+            }
+            list
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(title), \(count)")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
-
-    // MARK: List
 
     @ViewBuilder
-    private var mistakeList: some View {
-        if let selectedKind {
-            Text(selectedKind.detail)
-                .font(.footnote)
-                .foregroundStyle(Palette.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+    private var header: some View {
+        if book.isAllClear {
+            AllClearPanel(title: "All clear", message: allClearMessage)
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+        } else {
+            TrainingHeader(book: book) { pick in navigate(.training(pick)) }
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
         }
-        Panel(padding: 0) {
-            VStack(spacing: 0) {
-                ForEach(Array(mistakes.enumerated()), id: \.element.id) { index, occurrence in
-                    if index > 0 { Hairline().padding(.leading, 16) }
-                    NavigationLink(value: Route.mistakeDrill(occurrence)) {
-                        MistakeCard(occurrence: occurrence).padding(.horizontal, 16)
+    }
+
+    private var allClearMessage: String {
+        guard let next = book.nextReview else { return "Every mistake here is learned." }
+        let puzzles = "\(next.count) puzzle\(next.count == 1 ? "" : "s")"
+        return "Nothing due. \(puzzles) come\(next.count == 1 ? "s" : "") back in \(MistakeState.days(until: next.date))."
+    }
+
+    @ViewBuilder
+    private var list: some View {
+        let items = Array(shown.prefix(limit))
+        if items.isEmpty {
+            Text("No errors match.")
+                .font(.subheadline)
+                .foregroundStyle(Palette.inkSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+        }
+        ForEach(isOneGame ? [MistakeBook.Section(start: .distantPast, title: "This game", items: items)] : book.sections(items)) { section in
+            Section {
+                VStack(spacing: 0) {
+                    ForEach(Array(section.items.enumerated()), id: \.element.id) { index, occurrence in
+                        if index > 0 { Hairline().padding(.leading, 100) }
+                        row(occurrence)
+                            .modifier(RiseIn(index: rank(of: occurrence, in: items)))
+                            .transition(.asymmetric(insertion: .opacity,
+                                                    removal: .opacity.combined(with: .scale(scale: 0.96, anchor: .top))))
                     }
-                    .buttonStyle(.plain)
                 }
+                .background(RoundedRectangle(cornerRadius: Layout.cardRadius, style: .continuous).fill(Palette.surface))
+                .clipShape(RoundedRectangle(cornerRadius: Layout.cardRadius, style: .continuous))
+            } header: {
+                MistakeSectionHeader(section: section)
             }
         }
-        if canShowMore {
-            Button("Show more", action: showMore)
+        .id(listKey)
+        if shown.count > limit {
+            Button("Show more") { withAnimation(.smooth(duration: 0.3)) { limit += Self.pageSize } }
                 .buttonStyle(SecondaryButtonStyle())
         }
+    }
+
+    private func rank(of occurrence: MistakeOccurrence, in items: [MistakeOccurrence]) -> Int {
+        items.firstIndex { $0.id == occurrence.id } ?? 0
+    }
+
+    private func row(_ occurrence: MistakeOccurrence) -> some View {
+        SwipeRow(actions: actions(for: occurrence)) {
+            Button { navigate(.mistakeDrill(occurrence)) } label: {
+                MistakeCard(occurrence: occurrence).padding(.horizontal, 16)
+            }
+            .buttonStyle(.plain)
+        }
+        .contextMenu {
+            ForEach(actions(for: occurrence)) { action in
+                Button(action.title, systemImage: action.symbol, action: action.run)
+            }
+        }
+    }
+
+    private func actions(for occurrence: MistakeOccurrence) -> [SwipeAction] {
+        var actions: [SwipeAction] = []
+        if ignore != nil {
+            actions.append(.init(title: "Open game", symbol: "arrow.up.forward.square", tint: Palette.brand) {
+                navigate(.gameReview(gameKey: occurrence.gameKey, ply: occurrence.ply))
+            })
+        }
+        if let ignore {
+            actions.append(.init(title: "Ignore", symbol: "eye.slash", tint: Palette.inkSecondary) {
+                withAnimation(.smooth(duration: 0.35)) { ignore(occurrence) }
+            })
+        }
+        return actions
+    }
+}
+
+/// Development only: opens the tab scrolled to one part (`-scroll-to`), for screenshots.
+enum DevelopmentScroll {
+    @MainActor
+    static func apply(_ reader: ScrollViewProxy) async {
+        #if DEBUG
+        guard let target = DevelopmentSeed.scrollTarget else { return }
+        try? await Task.sleep(for: .milliseconds(900))
+        reader.scrollTo(target, anchor: .top)
+        #endif
     }
 }
 
@@ -240,84 +315,5 @@ struct GameScopePill: View {
         .frame(minHeight: Layout.minimumTarget)
         .background(Capsule().fill(Palette.brandSoft))
         .overlay(Capsule().strokeBorder(Palette.brand.opacity(0.35), lineWidth: 1))
-    }
-}
-
-/// One error: a thumbnail of the position with the move played as a red arrow, the move and
-/// its severity, labels for what kind of mistake it was, and a green check once it is solved.
-struct MistakeCard: View {
-    let occurrence: MistakeOccurrence
-
-    private var thumbnail: BoardPresentation {
-        var presentation = BoardPresentation(pieces: ChessBoard(fen: occurrence.fenBefore)?.snapshot
-                                                ?? BoardPresentation.empty.pieces,
-                                             orientation: occurrence.color)
-        presentation.mistakeMove = occurrence.move
-        return presentation
-    }
-
-    var body: some View {
-        HStack(spacing: 12) {
-            BoardView(presentation: thumbnail, showsCoordinates: false, cornerRadius: 8)
-                .frame(width: 56, height: 56)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Text("\(occurrence.moveNumberLabel) \(occurrence.san)")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Palette.ink)
-                    if let severity = occurrence.severity {
-                        Badge(text: severity.label, tone: severity.color)
-                    }
-                }
-                if !occurrence.kinds.isEmpty {
-                    MistakeKindLabels(kinds: occurrence.kinds)
-                }
-                Text("vs \(occurrence.opponent) · \(Format.relative(occurrence.endTime)) · \(occurrence.phase.label)")
-                    .font(.caption2)
-                    .foregroundStyle(Palette.inkTertiary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 6)
-            if occurrence.isSolved {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(Palette.best)
-                    .transition(.scale(scale: 0.3).combined(with: .opacity))
-            } else {
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Palette.inkTertiary)
-            }
-        }
-        .padding(.vertical, 10)
-        .frame(minHeight: Layout.minimumTarget)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(occurrence.isSolved ? "Solved" : "Not solved")
-        .accessibilityHint("Opens the position to find a better move")
-    }
-}
-
-/// What kind of mistake a move was. A pattern the board demonstrates is marked as a tactic; a
-/// consequence, for a move no pattern explains, is quieter.
-struct MistakeKindLabels: View {
-    let kinds: [MistakeCategory]
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(kinds) { kind in
-                HStack(spacing: 3) {
-                    Image(systemName: kind.isPattern ? "scope" : "arrow.down.right")
-                        .font(.system(size: 9, weight: .bold))
-                    Text(kind.title)
-                        .lineLimit(1)
-                }
-                .font(.caption.weight(kind.isPattern ? .semibold : .regular))
-                .foregroundStyle(kind.isPattern ? Palette.brass : Palette.inkSecondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
     }
 }

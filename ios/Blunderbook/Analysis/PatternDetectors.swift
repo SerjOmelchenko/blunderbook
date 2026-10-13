@@ -465,6 +465,90 @@ enum PatternDetectors {
         }
     }
 
+    // MARK: - Targets
+
+    /// The squares a pattern is about, for rings on the board: the pieces a fork hits, the piece
+    /// left hanging, the capture skipped, the piece pinned, the king mated. Found the way the
+    /// detectors found the pattern, from the same lines; empty when nothing on the board shows it.
+    static func targetSquares(for tag: PatternTag, in context: DetectionContext) -> [Int] {
+        switch tag {
+        case .allowedFork, .missedFork:
+            let missed = tag == .missedFork
+            let board = missed ? context.boardBefore : context.boardAfter
+            let line = missed ? context.bestLine : context.replyLine
+            let walked = resolveForcingLine(from: board, line: line, perspective: context.mover).san.count
+            for (attackerBoard, move) in attackerMoves(from: board, line: line, walked: walked) {
+                let targets = forkTargetSquares(board: attackerBoard, move: move)
+                if targets.count >= 2 { return targets }
+            }
+            return []
+        case .undefendedPiece:
+            let walked = resolveForcingLine(from: context.boardAfter, line: context.replyLine,
+                                            perspective: context.mover).san.count
+            for (board, move) in attackerMoves(from: context.boardAfter, line: context.replyLine, walked: walked) {
+                guard board.isCapture(move), let victim = board.piece(at: move.toSquare),
+                      victim.color == context.mover, victim.kind != .pawn else { continue }
+                return [move.toSquare]
+            }
+            return []
+        case .missedCapture:
+            guard let move = context.bestLine.first, context.boardBefore.isLegalMove(move),
+                  context.boardBefore.isCapture(move) else { return [] }
+            return [move.toSquare]
+        case .allowedAbsolutePin:
+            let walked = resolveForcingLine(from: context.boardAfter, line: context.replyLine,
+                                            perspective: context.mover).san.count
+            for (board, move) in attackerMoves(from: context.boardAfter, line: context.replyLine, walked: walked) {
+                if let square = pinnedSquare(board: board, move: move, mover: context.mover) { return [square] }
+            }
+            return []
+        case .allowedMate:
+            return [context.boardAfter.kingSquare(of: context.mover)]
+        case .missedMate:
+            return [context.boardBefore.kingSquare(of: context.mover.opposite)]
+        }
+    }
+
+    /// The non-pawn pieces, king included, that `move` attacks once played.
+    private static func forkTargetSquares(board: ChessBoard, move: Move) -> [Int] {
+        let working = board.copy()
+        let mover = working.sideToMove
+        working.makeMove(move)
+        guard let piece = working.piece(at: move.toSquare) else { return [] }
+        return (0..<64).filter { square in
+            guard let target = working.piece(at: square), target.color == mover.opposite, target.kind != .pawn else { return false }
+            return attacks(board: working, from: move.toSquare, piece: piece, to: square)
+        }
+    }
+
+    /// The square of the piece `move` pins against `mover`'s king, if it pins one.
+    private static func pinnedSquare(board: ChessBoard, move: Move, mover: PieceColor) -> Int? {
+        let working = board.copy()
+        working.makeMove(move)
+        guard let slider = working.piece(at: move.toSquare),
+              [.bishop, .rook, .queen].contains(slider.kind) else { return nil }
+        let kingSquare = working.kingSquare(of: mover)
+        let directions: Range<Int>
+        switch slider.kind {
+        case .bishop: directions = ChessTables.bishopDirections
+        case .rook: directions = ChessTables.rookDirections
+        default: directions = 0..<8
+        }
+        for direction in directions {
+            var firstBlocker: Int?
+            for square in ChessTables.rays[direction][move.toSquare] where working.squares[square] != 0 {
+                if firstBlocker == nil {
+                    guard working.piece(at: square)?.color == mover else { break }
+                    firstBlocker = square
+                } else {
+                    if square == kingSquare { return firstBlocker }
+                    break
+                }
+            }
+        }
+        return nil
+    }
+
     private static func evidenceSquares(_ context: DetectionContext) -> [Int] {
         var squares: [Int] = []
         if let move = context.replyLine.first { squares.append(move.toSquare) }

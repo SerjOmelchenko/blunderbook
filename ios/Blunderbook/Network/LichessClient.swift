@@ -63,6 +63,8 @@ actor LichessClient {
                                        resolvingAgainstBaseURL: false)!
         var query = [URLQueryItem(name: "finished", value: "true"),
                      URLQueryItem(name: "opening", value: "true"),
+                     // Each move's remaining clock as a `[%clk]` comment, for the review's times.
+                     URLQueryItem(name: "clocks", value: "true"),
                      URLQueryItem(name: "pgnInJson", value: "true"),
                      URLQueryItem(name: "perfType", value: request.perfTypes.joined(separator: ","))]
         if let since = request.since { query.append(URLQueryItem(name: "since", value: String(since))) }

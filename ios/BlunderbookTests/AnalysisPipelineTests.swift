@@ -197,7 +197,7 @@ final class AnalysisPipelineTests: XCTestCase {
         let labels = try XCTUnwrap(blunder.labels)
         XCTAssertEqual(blunder.san, "g4")
         XCTAssertEqual(blunder.severity, .blunder)
-        XCTAssertTrue(labels.confirmed, "an error is confirmed at the larger budget")
+        XCTAssertFalse(labels.confirmed, "every position gets one search; nothing is searched again")
         XCTAssertNotNil(labels.bestMoveSAN, "the better move is named")
         XCTAssertFalse(labels.bestLineUCI.isEmpty, "and its line kept for the board arrow")
         XCTAssertTrue(labels.tags.contains(.allowedMate))

@@ -217,33 +217,6 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(analytics.activeCountIgnoringDates, 0)
     }
 
-    func testBulkTakesTheHundredMostRecentGamesWithoutADeepReview() throws {
-        let player = try makePlayer("alice", providerID: "1")
-        let records = (0..<150).map { makeGame(index: $0, white: "alice", black: "bob", daysAgo: Double($0)) }
-        try games.upsert(records)
-        for record in records { try games.link(playerID: player.id, game: record, color: .white) }
-        // The ten newest games already have a deep review, except one with only a quicker one.
-        for record in records.prefix(10) {
-            var provenance = AnalysisPolicy.activeProvenance
-            if record.gameKey != "game-3" { provenance.policyID = DeepReview.identifier }
-            var analysis = GameAnalysis(gameKey: record.gameKey, provenance: provenance, status: .complete, nextPly: 0)
-            analysis.completedAt = Date()
-            try analyses.save(analysis)
-        }
-        try analyses.markFailed(gameKey: "game-10", message: "test", policyID: DeepReview.identifier)
-
-        let keys = try games.eligibleKeys(playerID: player.id, scope: .allDownloaded, timeClass: .rapid)
-        let plan = AppModel.BulkPlan(unreviewedNewestFirst: try analyses.withoutDeepReview(keys))
-        XCTAssertEqual(plan.eligible.count, 100)
-        XCTAssertEqual(plan.eligible.first, "game-3", "a quicker analysis is not an in-depth review")
-        XCTAssertEqual(plan.eligible[1], "game-10", "a failed game has no review, so it is retried")
-        XCTAssertEqual(plan.eligible.last, "game-108", "newest first, carrying on past the reviewed ones")
-        XCTAssertEqual(plan.unreviewed, 141)
-
-        let small = AppModel.BulkPlan(unreviewedNewestFirst: ["a", "b"])
-        XCTAssertEqual(small.eligible, ["a", "b"], "fewer than a hundred left: all of them")
-    }
-
     func testOutOfWindowReviewStaysReadableButLeavesTheMetrics() throws {
         let player = try makePlayer("alice", providerID: "1")
         var records: [GameRecord] = []
@@ -830,6 +803,81 @@ final class PersistenceTests: XCTestCase {
         try analyses.save(makeAnalysis(for: game, deep: true))
         backlog = try statistics.mistakeBacklog(playerID: player.id, filters: filters, scope: .allDownloaded)
         XCTAssertEqual(backlog.solved, 1)
+    }
+
+    func testMistakeDrillsAreScheduledIgnoredAndLedInto() throws {
+        let book = MistakeBookRepository(database: database)
+        let player = try makePlayer("alice", providerID: "1")
+        let game = makeGame(index: 1, white: "alice", black: "bob", daysAgo: 1)
+        try games.upsert([game])
+        try games.link(playerID: player.id, game: game, color: .white)
+        try analyses.save(makeAnalysis(for: game, deep: true))
+        var filters = GameFilters.default
+        filters.dateRange = .allTime
+
+        var found = try book.occurrences(playerID: player.id, filters: filters, scope: .allDownloaded)
+        let card = try XCTUnwrap(found.first)
+        XCTAssertEqual(found.count, 1)
+        XCTAssertNil(card.review)
+        XCTAssertEqual(card.state(), .new)
+        XCTAssertEqual(card.loss, 25)
+        XCTAssertEqual(card.scoreAfter, .centipawns(-300))
+        XCTAssertEqual(card.bestLineUCI, ["d2d4", "d7d5"])
+        XCTAssertEqual(card.replyLineUCI, ["e7e5"])
+        XCTAssertEqual(card.openingName, "Scotch Game")
+
+        let now = Date()
+        try book.record([card.ref], result: .clean, at: now)
+        found = try book.occurrences(playerID: player.id, filters: filters, scope: .allDownloaded)
+        var review = try XCTUnwrap(found.first?.review)
+        XCTAssertTrue(try XCTUnwrap(found.first).isSolved, "a solve marks it solved")
+        XCTAssertEqual(review.drills, 1)
+        XCTAssertEqual(review.streak, 1)
+        XCTAssertEqual(review.firstResult, "clean")
+        XCTAssertEqual(try XCTUnwrap(review.dueAt).timeIntervalSince(now), 3 * 86_400, accuracy: 1)
+
+        try book.record([card.ref], result: .revealed, at: now)
+        found = try book.occurrences(playerID: player.id, filters: filters, scope: .allDownloaded)
+        review = try XCTUnwrap(found.first?.review)
+        XCTAssertEqual(review.drills, 2)
+        XCTAssertEqual(review.streak, 0, "anything but a clean solve starts again")
+        XCTAssertEqual(review.firstResult, "clean", "the first result stays")
+        XCTAssertEqual(try XCTUnwrap(review.dueAt).timeIntervalSince(now), 86_400, accuracy: 1)
+
+        try book.setIgnored([card.ref], true)
+        XCTAssertTrue(try book.occurrences(playerID: player.id, filters: filters, scope: .allDownloaded).isEmpty)
+        try book.setIgnored([card.ref], false)
+        XCTAssertEqual(try book.occurrences(playerID: player.id, filters: filters, scope: .allDownloaded).count, 1)
+
+        XCTAssertNil(try book.leadIn(gameKey: game.gameKey, ply: 0), "nothing comes before the first move")
+        let leadIn = try XCTUnwrap(try book.leadIn(gameKey: game.gameKey, ply: 2))
+        XCTAssertEqual(leadIn.fen, ChessBoard.startFEN)
+        XCTAssertEqual(leadIn.moves, [Move.fromUCI("e2e4")!, Move.fromUCI("e7e5")!])
+    }
+
+    func testAnIgnoredMistakeCountsAsDealtWithInGames() throws {
+        let book = MistakeBookRepository(database: database)
+        let player = try makePlayer("alice", providerID: "1")
+        let game = makeGame(index: 1, white: "alice", black: "bob", daysAgo: 1)
+        try games.upsert([game])
+        try games.link(playerID: player.id, game: game, color: .white)
+        try analyses.save(makeAnalysis(for: game, deep: true))
+        XCTAssertFalse(try XCTUnwrap(try games.entry(playerID: player.id, gameKey: game.gameKey)).allMistakesSolved)
+        try book.setIgnored([MistakeRef(gameKey: game.gameKey, ply: 0)], true)
+        XCTAssertTrue(try XCTUnwrap(try games.entry(playerID: player.id, gameKey: game.gameKey)).allMistakesSolved)
+    }
+
+    func testMigratingKeepsSolvedMistakesAsDrilled() throws {
+        let path = temporaryDirectory.appendingPathComponent("v10.sqlite").path
+        let old = try SQLiteDatabase(path: path)
+        try Schema.migrate(old, to: 10)
+        try old.run("INSERT INTO solved_mistakes (game_key, ply, solved_at) VALUES ('g', 4, 1000);")
+        try Schema.migrate(old)
+        let row = try XCTUnwrap(try old.queryOne("SELECT * FROM mistake_reviews WHERE game_key = 'g' AND ply = 4;"))
+        XCTAssertEqual(row.int("drills"), 1)
+        XCTAssertEqual(row.int("streak"), 1)
+        XCTAssertEqual(row.string("first_result"), "solved", "says nothing about first tries")
+        XCTAssertEqual(row.double("due_at"), 1000 + 3 * 86_400)
     }
 
     func testBackupKeepsDeepReviewsAndPrefersThemOnImport() throws {

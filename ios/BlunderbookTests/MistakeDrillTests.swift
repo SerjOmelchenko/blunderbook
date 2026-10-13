@@ -72,4 +72,51 @@ final class MistakeDrillTests: XCTestCase {
         XCTAssertEqual(drill.phase, .thinking)
         XCTAssertTrue(drill.presentation.lineArrows.isEmpty)
     }
+
+    func testHintsRingThePieceThenNameThePatternThenShowTheAnswer() {
+        let drill = makeDrill()
+        var results: [DrillResult] = []
+        drill.onResult = { results.append($0) }
+        XCTAssertEqual(drill.hintTitle, "Hint")
+        drill.hint()
+        XCTAssertEqual(drill.presentation.targetRings, [square("e2")], "the piece to move is ringed")
+        XCTAssertNil(drill.hintText)
+        drill.hint()
+        XCTAssertNotNil(drill.hintText)
+        XCTAssertEqual(drill.hintTitle, "Show answer")
+        drill.hint()
+        XCTAssertEqual(drill.phase, .revealed)
+        XCTAssertEqual(results, [.revealed])
+        drill.retry()
+        drill.tap(square("e2")) {}
+        drill.tap(square("e4")) {}
+        XCTAssertEqual(results, [.revealed], "only the first ending counts")
+    }
+
+    func testAFirstTrySolveIsCleanAndAHintedOneIsNot() {
+        let clean = makeDrill()
+        var cleanResult: DrillResult?
+        clean.onResult = { cleanResult = $0 }
+        clean.tap(square("e2")) {}
+        clean.tap(square("e4")) {}
+        XCTAssertEqual(cleanResult, .clean)
+
+        let helped = makeDrill()
+        var helpedResult: DrillResult?
+        helped.onResult = { helpedResult = $0 }
+        helped.hint()
+        helped.tap(square("e2")) {}
+        helped.tap(square("e4")) {}
+        XCTAssertEqual(helpedResult, .helped)
+    }
+
+    func testAfterSolvingTheGameLineCanBePlayedOut() {
+        let drill = makeDrill()
+        drill.tap(square("e2")) {}
+        drill.tap(square("e4")) {}
+        drill.play(.game)
+        XCTAssertEqual(drill.shownLine, .game)
+        XCTAssertNil(drill.presentation.badge, "the tried move gives way to the line")
+        XCTAssertEqual(drill.presentation.pieces, ChessBoard(fen: ChessBoard.startFEN)!.snapshot, "the line starts from the puzzle")
+    }
 }

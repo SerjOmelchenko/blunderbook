@@ -31,6 +31,8 @@ enum DevelopmentSeed {
         var demoRating: Int
         var opponentRating: Int
         var analyse: Bool
+        /// How the loser's game ended, in Chess.com's result codes.
+        var loserResult = "checkmated"
     }
 
     nonisolated static let username = "demoplayer"
@@ -71,12 +73,17 @@ enum DevelopmentSeed {
     nonisolated static var opensFirstMistake: Bool { argument("-open-route") == "first-mistake" }
 
     /// `-queue-game demo-3`: queues that game's in-depth review a moment after launch, to watch
-    /// its rings in Games go from grey to spinning to settled.
+    /// its rings in Games spin, then (left untouched) fly you through them into the game.
     nonisolated static var queuedGame: String? { argument("-queue-game") }
 
-    nonisolated static var opensBulkPreparation: Bool {
-        argument("-open-sheet") == "bulk"
-    }
+    /// `-unlock-mistakes`: the Mistakes tab opens without Premium, to check it on real data.
+    nonisolated static var unlocksMistakes: Bool { ProcessInfo.processInfo.arguments.contains("-unlock-mistakes") }
+
+    /// `-scroll-to leak`: Mistakes (or its preview) opens scrolled to that part: `leak`, `kinds`.
+    nonisolated static var scrollTarget: String? { argument("-scroll-to").map { "mistakes-\($0)" } }
+
+    /// `-scroll-bottom`: Analytics opens scrolled to its end, to see the analysis rows.
+    nonisolated static var scrollsToBottom: Bool { ProcessInfo.processInfo.arguments.contains("-scroll-bottom") }
 
     /// `-time-class daily`, `-date-range week` — presets the shared filter so a screen can be
     /// inspected in a given state without tapping.
@@ -121,8 +128,8 @@ enum DevelopmentSeed {
             let whiteResult: String
             let blackResult: String
             switch result {
-            case "1-0": whiteResult = "win"; blackResult = "checkmated"
-            case "0-1": whiteResult = "checkmated"; blackResult = "win"
+            case "1-0": whiteResult = "win"; blackResult = fixture.loserResult
+            case "0-1": whiteResult = fixture.loserResult; blackResult = "win"
             default: whiteResult = "agreed"; blackResult = "agreed"
             }
             let record = GameRecord(gameKey: key,
@@ -289,7 +296,40 @@ enum DevelopmentSeed {
             8.Qg3 Nxe4 9.Nxe4 Rxe4 10.Bf4 Qf6 11.Nf3 Rxf4 0-1
             """,
                 demoPlaysWhite: true, timeClass: .blitz, timeControl: "300", rated: false,
-                daysAgo: 20, demoRating: 1399, opponentRating: 1430, analyse: false)
+                daysAgo: 20, demoRating: 1399, opponentRating: 1430, analyse: false),
+
+        // The game from the review walkthrough, with Chess.com's clock comments, so the
+        // review's clock times, scramble and summary can be seen: `-open-game demo-10`.
+        Fixture(pgn: """
+            [Event "Demo"]
+            [Result "1-0"]
+            [ECO "C41"]
+            [Opening "Philidor Defense"]
+            [TimeControl "600"]
+
+            1. e4 {[%clk 0:09:59]} 1... e5 {[%clk 0:09:58]} 2. Nf3 {[%clk 0:09:57]}
+            2... d6 {[%clk 0:09:55]} 3. d4 {[%clk 0:09:55]} 3... exd4 {[%clk 0:09:51]}
+            4. Nxd4 {[%clk 0:09:52]} 4... Nf6 {[%clk 0:09:48]} 5. Nc3 {[%clk 0:09:48]}
+            5... Be7 {[%clk 0:09:43]} 6. Bc4 {[%clk 0:09:37]} 6... O-O {[%clk 0:09:35]}
+            7. O-O {[%clk 0:09:31]} 7... Nc6 {[%clk 0:09:23]} 8. Bg5 {[%clk 0:09:07]}
+            8... Nxe4 {[%clk 0:09:14]} 9. Nxe4 {[%clk 0:09:04]} 9... Bxg5 {[%clk 0:09:00]}
+            10. Nxc6 {[%clk 0:08:49]} 10... bxc6 {[%clk 0:08:53]} 11. Nxg5 {[%clk 0:08:40]}
+            11... Qxg5 {[%clk 0:08:47]} 12. Re1 {[%clk 0:08:02]} 12... Ba6 {[%clk 0:08:26]}
+            13. Qd3 {[%clk 0:07:58]} 13... Bxc4 {[%clk 0:08:16]} 14. Qxc4 {[%clk 0:07:51]}
+            14... Rab8 {[%clk 0:07:51]} 15. Qxc6 {[%clk 0:07:20]} 15... Rxb2 {[%clk 0:07:39]}
+            16. Kh1 {[%clk 0:07:18]} 16... Qd2 {[%clk 0:07:21]} 17. Qxc7 {[%clk 0:06:06]}
+            17... Qxf2 {[%clk 0:07:12]} 18. Rac1 {[%clk 0:05:30]} 18... Rxa2 {[%clk 0:06:55]}
+            19. Red1 {[%clk 0:04:35]} 19... h6 {[%clk 0:06:33]} 20. Rxd6 {[%clk 0:03:49]}
+            20... Qf4 {[%clk 0:06:14]} 21. Rcd1 {[%clk 0:01:51]} 21... Re8 {[%clk 0:06:00]}
+            22. Rd7 {[%clk 0:01:24]} 22... Qf5 {[%clk 0:05:44]} 23. h3 {[%clk 0:01:02]}
+            23... Re3 {[%clk 0:05:33]} 24. R7d3 {[%clk 0:00:43]} 24... Rxd3 {[%clk 0:05:24]}
+            25. Rxd3 {[%clk 0:00:37]} 25... Ra1+ {[%clk 0:05:11]} 26. Kh2 {[%clk 0:00:29]}
+            26... Re1 {[%clk 0:05:03]} 27. Rc3 {[%clk 0:00:24]} 27... Qf6 {[%clk 0:04:48]}
+            28. Rd3 {[%clk 0:00:20]} 28... g6 {[%clk 0:04:36]} 29. Qd8+ {[%clk 0:00:15]}
+            29... Kh7 {[%clk 0:04:30]} 30. Qxf6 {[%clk 0:00:12]} 1-0
+            """,
+                demoPlaysWhite: true, timeClass: .rapid, timeControl: "600", rated: true,
+                daysAgo: 0.01, demoRating: 1552, opponentRating: 1541, analyse: true, loserResult: "resigned"),
     ]
 }
 #endif

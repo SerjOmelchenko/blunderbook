@@ -98,6 +98,19 @@ final class OpeningBook: @unchecked Sendable {
         return board.zobrist ^ Zobrist.table.enPassantFile[Square.file(board.enPassantSquare)]
     }
 
+    /// The book's moves from `board`: each legal move that reaches a position on a known line,
+    /// moves to named positions first. Empty off the book.
+    func theoryMoves(from board: ChessBoard) -> [Move] {
+        var named: [Move] = [], others: [Move] = []
+        for move in board.legalMoves() {
+            board.makeMove(move)
+            let key = Self.key(board)
+            if names[key] != nil { named.append(move) } else if positions.contains(key) { others.append(move) }
+            board.unmakeMove()
+        }
+        return named + others
+    }
+
     /// Follows a game from the standard starting position. A game from any other position has
     /// no book.
     func trace(startFEN: String, moves: [Move]) -> OpeningTrace {

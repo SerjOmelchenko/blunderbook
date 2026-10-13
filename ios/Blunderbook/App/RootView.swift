@@ -11,8 +11,11 @@ import SwiftUI
 
 /// Destinations pushed inside a root tab's navigation stack.
 enum Route: Hashable {
+    /// A game as it is: opening it never starts an analysis.
     case gameReview(gameKey: String, ply: Int?)
     case mistakeDrill(MistakeOccurrence)
+    /// Several mistakes drilled one after another, then the session's result.
+    case training([MistakeOccurrence])
     case explore(ExploreStart)
     case queue
     case howAnalysisWorks
@@ -21,12 +24,17 @@ enum Route: Hashable {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showsPlayers = false
     @State private var showsSettings = false
     @State private var showsFilters = false
     @State private var showsPaywall = false
     @State private var showsMistakesPreview = false
     @State private var paths: [RootTab: [Route]] = [:]
+    /// The game's scale behind the hole in the list while you fly through a row's rings
+    /// (`RevealPortal`); 1 the rest of the time.
+    @State private var revealScale: CGFloat = 1
+    @State private var rootFrame: CGRect = .zero
     /// Development only: a screen opened straight from launch to inspect it.
     @State private var debugScreen: DebugScreen?
 
@@ -52,14 +60,39 @@ struct RootView: View {
                         .tag(tab)
                     }
                 }
-                .modifier(QueueAccessoryModifier(hasWork: hasQueuedWork && !isReviewingGame) { openQueue() })
+                .scaleEffect(revealScale, anchor: revealAnchor)
+                .modifier(QueueAccessoryModifier(isShowing: isAnalysisBarShowing || isBarHeldForReveal))
+                .onChange(of: isReviewingGame, initial: true) { _, onScreen in model.isGameOnScreen = onScreen }
+                .onChange(of: model.coordinator.counts) { _, _ in model.revealIfLanded() }
                 .onChange(of: model.selectedTab) { _, _ in model.persistSelection() }
+                .onChange(of: paths[.games]?.isEmpty ?? true, initial: true) { _, isEmpty in
+                    model.isGamesListShowing = isEmpty
+                }
+                .onChange(of: model.pendingRoute) { _, route in
+                    guard let route else { return }
+                    model.pendingRoute = nil
+                    paths[model.selectedTab, default: []].append(route)
+                }
                 // A subscription that lapsed while Mistakes was open leaves it.
                 .onChange(of: model.isMistakesLocked, initial: true) { _, isLocked in
                     if isLocked, model.selectedTab == .mistakes { model.selectedTab = .analytics }
                 }
             }
         }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rootFrame = $0 }
+        .overlay {
+            if let reveal = model.reveal {
+                RevealPortal(reveal: reveal) {
+                    openRevealedGame(reveal)
+                } onFlight: {
+                    withAnimation(.timingCurve(0.33, 1, 0.68, 1, duration: RevealPortal.flight)) { revealScale = 1 }
+                } onFinished: {
+                    revealScale = 1
+                    model.reveal = nil
+                }
+            }
+        }
+        .background(TouchActivityMonitor { model.lastTouchAt = Date() })
         .task { applyDevelopmentRoute() }
         .sheet(isPresented: $showsPlayers) { PlayersSheet().hostsPaywall() }
         .sheet(isPresented: $showsSettings) { SettingsSheet().hostsPaywall() }
@@ -68,7 +101,7 @@ struct RootView: View {
         .sheet(item: $debugScreen) { screen in debugView(screen) }
         .hostsPaywall(isPresented: $showsPaywall)
         .environment(\.showFilters, ShowFiltersAction { showsFilters = true })
-        .environment(\.openMistakes, OpenMistakesAction { openMistakes(gameKey: $0) })
+        .environment(\.openMistakes, OpenMistakesAction { openMistakes(gameKey: $0, kind: $1) })
     }
 
     /// The tab bar's selection. Tapping the locked Mistakes tab opens its preview and leaves the
@@ -85,11 +118,17 @@ struct RootView: View {
         })
     }
 
-    /// With `gameKey`, Mistakes opens at its list narrowed to that game.
-    private func openMistakes(gameKey: String? = nil) {
+    /// With `gameKey`, Mistakes opens at its list narrowed to that game; with `kind`, at every
+    /// game's errors of that kind.
+    private func openMistakes(gameKey: String? = nil, kind: MistakeCategory? = nil) {
         if model.isMistakesLocked { showsMistakesPreview = true; return }
         if let gameKey {
             model.mistakesGameKey = gameKey
+            paths[.mistakes] = []
+        }
+        if let kind {
+            model.mistakesGameKey = nil
+            model.mistakesKind = kind
             paths[.mistakes] = []
         }
         model.selectedTab = .mistakes
@@ -107,9 +146,37 @@ struct RootView: View {
     /// A game review shows its own analysis, and its controls sit where the accessory would.
     private var isReviewingGame: Bool {
         switch paths[model.selectedTab]?.last {
-        case .gameReview, .mistakeDrill, .explore: return true
+        case .gameReview, .mistakeDrill, .training, .explore: return true
         default: return false
         }
+    }
+
+    /// Under the photo of the screen, so the push has no slide of its own. The game opens on the
+    /// tab that was showing and waits small behind the hole until the flight scales it up.
+    private func openRevealedGame(_ reveal: AppModel.Reveal) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            model.reveal?.isCovered = true
+            paths[reveal.tab, default: []].append(.gameReview(gameKey: reveal.gameKey, ply: nil))
+            if !reduceMotion { revealScale = RevealPortal.gameStartScale }
+        }
+    }
+
+    /// The bottom bar shows while a game waits or is analysed, except over a game.
+    private var isAnalysisBarShowing: Bool { hasQueuedWork && !isReviewingGame }
+
+    /// The flight leaves from the bar's rings: the bar stays up, full, until the photo of the
+    /// screen covers it, and goes before the game shows through.
+    private var isBarHeldForReveal: Bool {
+        guard let reveal = model.reveal else { return false }
+        return reveal.fromBar && !reveal.isCovered
+    }
+
+    /// The rings being flown through, as a point in the root view.
+    private var revealAnchor: UnitPoint {
+        guard let origin = model.reveal?.origin, rootFrame.width > 0, rootFrame.height > 0 else { return .center }
+        return UnitPoint(x: (origin.x - rootFrame.minX) / rootFrame.width, y: (origin.y - rootFrame.minY) / rootFrame.height)
     }
 
     private func openQueue() {
@@ -140,7 +207,7 @@ struct RootView: View {
         if let key = DevelopmentSeed.queuedGame {
             Task {
                 try? await Task.sleep(for: .seconds(3))
-                model.requestReview(gameKey: key, deep: true)
+                model.analyseThenOpen(gameKey: key)
             }
         }
         if DevelopmentSeed.opensFirstMistake, let player = model.selectedPlayer,
@@ -208,6 +275,7 @@ struct RootView: View {
         switch route {
         case .gameReview(let key, let ply): GameReviewScreen(gameKey: key, initialPly: ply)
         case .mistakeDrill(let occurrence): MistakeDrillScreen(occurrence: occurrence)
+        case .training(let queue): MistakeDrillScreen(queue: queue)
         case .explore(let start): ExploreScreen(start: start, mode: startupExploreMode)
         case .queue: QueueScreen()
         case .howAnalysisWorks: HowAnalysisWorksScreen()
@@ -266,11 +334,10 @@ struct RootView: View {
     }
 }
 
-/// Shows the analysis queue above the tab bar while there is work, the way iOS 26 shows an
-/// ongoing activity. Older systems reach the queue from a toolbar button instead.
+/// Shows the analysis above the tab bar while a game waits or is analysed, the way iOS 26 shows
+/// an ongoing activity. Older systems reach the queue from a toolbar button instead.
 struct QueueAccessoryModifier: ViewModifier {
-    let hasWork: Bool
-    let open: () -> Void
+    let isShowing: Bool
 
     static var isAvailable: Bool {
         if #available(iOS 26.1, *) { return true }
@@ -280,8 +347,8 @@ struct QueueAccessoryModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.1, *) {
             content
-                .tabViewBottomAccessory(isEnabled: hasWork) {
-                    QueueAccessory(open: open)
+                .tabViewBottomAccessory(isEnabled: isShowing) {
+                    QueueAccessory()
                 }
         } else {
             content
@@ -289,16 +356,20 @@ struct QueueAccessoryModifier: ViewModifier {
     }
 }
 
+/// The game being analysed, as a bar that fills with amber from 0 to 100 %: the three spinning
+/// rings of the Games rows, then "Analysing" and about how long is left. Not a control: it
+/// opens nothing. If the analysed game's row is off screen when the analysis lands, you fly
+/// through these rings into the game instead (`AppModel.revealIfLanded`).
 struct QueueAccessory: View {
     @Environment(AppModel.self) private var model
-    let open: () -> Void
 
     private var coordinator: AnalysisCoordinator { model.coordinator }
-    private var remaining: Int { coordinator.counts.pending + coordinator.counts.running }
-
-    private var fraction: Double { coordinator.currentFraction }
+    private var isRevealing: Bool { model.reveal?.fromBar == true }
+    /// Full while the flight leaves from here: the analysis has landed.
+    private var fraction: Double { isRevealing ? 1 : coordinator.currentFraction }
 
     private var title: String {
+        if isRevealing { return "Analysed" }
         if coordinator.isPausedByUser { return "Paused" }
         if let blocker = coordinator.primaryBlocker { return blocker.title }
         if coordinator.currentGameKey == nil { return "Waiting" }
@@ -306,36 +377,52 @@ struct QueueAccessory: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Button(action: open) {
-                HStack(spacing: 12) {
-                    ZStack {
-                        Circle().stroke(Color.white.opacity(0.18), lineWidth: 3)
-                        Circle()
-                            .trim(from: 0, to: max(0.02, fraction))
-                            .stroke(Palette.brand, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
-                    }
-                    .frame(width: 22, height: 22)
-                    Text(title).fontWeight(.semibold)
-                        + Text("  \(remaining) left").foregroundStyle(Palette.inkSecondary)
-                    Spacer(minLength: 0)
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let left = timeLeft(at: context.date)
+            HStack(spacing: 12) {
+                AccuracyRings(phase: .busy)
+                    .scaleEffect(Self.ringScale)
+                    .frame(width: 40 * Self.ringScale, height: 40 * Self.ringScale)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.barRingsFrame = $0 }
+                    // The flight carries these rings away; the bar's own copy steps aside.
+                    .opacity(isRevealing ? 0 : 1)
+                (Text(title).fontWeight(.semibold)
+                    + Text(left.map { "  \($0)" } ?? "").foregroundStyle(Palette.inkSecondary))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .font(.subheadline)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(alignment: .leading) {
+                GeometryReader { proxy in
+                    Palette.brand.opacity(0.32)
+                        .frame(width: proxy.size.width * min(1, max(0, fraction)))
+                        .animation(.easeOut(duration: 0.4), value: fraction)
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Analysis queue: \(title), \(remaining) games left")
-
-            if coordinator.isPausedByUser {
-                Button { coordinator.resume() } label: { Image(systemName: "play.fill") }
-                    .accessibilityLabel("Resume analysis")
-            } else {
-                Button { coordinator.pause() } label: { Image(systemName: "pause.fill") }
-                    .accessibilityLabel("Pause analysis")
-            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([title, left, "\(Int((fraction * 100).rounded())) percent"].compactMap { $0 }.joined(separator: ", "))
         }
-        .font(.subheadline)
-        .padding(.horizontal, 16)
+    }
+
+    /// The rings at the size the bar shows them; the flight starts from this size too.
+    static let ringScale: CGFloat = 0.65
+
+    /// About how long the game has left, from how fast it has gone so far. Nothing until there is
+    /// enough to go on, or while it is paused or held back.
+    private func timeLeft(at date: Date) -> String? {
+        guard !isRevealing, !coordinator.isPausedByUser, coordinator.primaryBlocker == nil,
+              let key = coordinator.currentGameKey,
+              let started = coordinator.activeGames[key]?.startedAt else { return nil }
+        let done = coordinator.currentFraction
+        let elapsed = date.timeIntervalSince(started)
+        guard done >= 0.04, elapsed >= 1 else { return "estimating time left" }
+        let seconds = elapsed * (1 - done) / done
+        if seconds < 5 { return "a few seconds left" }
+        if seconds < 60 { return "about \(Int((seconds / 5).rounded()) * 5) s left" }
+        return "about \(Int((seconds / 60).rounded())) min left"
     }
 }
 
@@ -386,13 +473,13 @@ struct ShowFiltersAction {
 
 /// Switches to the Mistakes tab, or opens its preview while it is locked.
 struct OpenMistakesAction {
-    let action: (String?) -> Void
-    /// Opens Mistakes; with `gameKey`, narrowed to that game.
-    func callAsFunction(gameKey: String? = nil) { action(gameKey) }
+    let action: (String?, MistakeCategory?) -> Void
+    /// Opens Mistakes; with `gameKey`, narrowed to that game; with `kind`, to that kind of mistake.
+    func callAsFunction(gameKey: String? = nil, kind: MistakeCategory? = nil) { action(gameKey, kind) }
 }
 
 private struct OpenMistakesKey: EnvironmentKey {
-    static let defaultValue = OpenMistakesAction { _ in }
+    static let defaultValue = OpenMistakesAction { _, _ in }
 }
 
 private struct ShowPaywallKey: EnvironmentKey {

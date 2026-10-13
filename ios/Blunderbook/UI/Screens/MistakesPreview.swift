@@ -21,18 +21,16 @@ struct MistakesPreviewSheet: View {
     @Environment(\.showPaywall) private var showPaywall
     @State private var path: [Route] = []
     @State private var selectedKind: MistakeCategory?
+    @State private var focus: MistakeFocus?
     @State private var solved: Set<String> = SampleMistakes.initiallySolved
 
-    private var all: [MistakeOccurrence] { SampleMistakes.occurrences(solved: solved) }
-    private var shown: [MistakeOccurrence] {
-        guard let selectedKind else { return all }
-        return all.filter { $0.kinds.contains(selectedKind) }
-    }
+    private var book: MistakeBook { MistakeBook(occurrences: SampleMistakes.occurrences(solved: solved)) }
 
     var body: some View {
         NavigationStack(path: $path) {
+            ScrollViewReader { reader in
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
                     intro
                     features
                     HStack(spacing: 8) {
@@ -41,14 +39,15 @@ struct MistakesPreviewSheet: View {
                         Badge(text: "Sample", tone: Palette.brass)
                     }
                     .padding(.top, 4)
-                    MistakesContent(breakdown: SampleMistakes.breakdown,
-                                    backlog: SampleMistakes.backlog(of: all),
-                                    accuracy: SampleMistakes.accuracy,
-                                    mistakes: shown,
-                                    selectedKind: $selectedKind.animation(.smooth(duration: 0.2)))
+                    MistakesContent(book: book,
+                                    selectedKind: $selectedKind.animation(.smooth(duration: 0.2)),
+                                    focus: $focus.animation(.smooth(duration: 0.2)),
+                                    navigate: { path.append($0) })
                 }
                 .padding(Layout.gutter)
                 .padding(.bottom, 12)
+            }
+            .task { await DevelopmentScroll.apply(reader) }
             }
             .screenBackground()
             .safeAreaInset(edge: .bottom, spacing: 0) { unlockBar }
@@ -88,7 +87,9 @@ struct MistakesPreviewSheet: View {
                 feature("scope", "What went wrong",
                         "Hanging piece, allowed fork, missed mate. Tap one to filter.")
                 feature("puzzlepiece", "Solve it as a puzzle",
-                        "Find a better move; the engine checks it.")
+                        "Find a better move; the engine checks it. Hints if you need them.")
+                feature("arrow.triangle.2.circlepath", "Until it sticks",
+                        "Solved ones come back after 3, 10 and 30 days.")
             }
         }
     }
@@ -135,19 +136,23 @@ struct MistakesPreviewSheet: View {
     }
 
     private var unlockCaption: String {
-        guard model.entitlement.product != nil else { return "Includes deeper reviews, bulk analysis and more players." }
+        guard model.entitlement.product != nil else { return "Includes deeper reviews and more players." }
         let price = model.entitlement.priceDescription
-        if model.entitlement.freeTrial != nil { return "Then \(price). Includes deeper reviews, bulk analysis and more players." }
-        return "\(price). Includes deeper reviews, bulk analysis and more players."
+        if model.entitlement.freeTrial != nil { return "Then \(price). Includes deeper reviews and more players." }
+        return "\(price). Includes deeper reviews and more players."
+    }
+
+    private func tick(_ solvedOne: MistakeOccurrence) {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { _ = solved.insert(solvedOne.id) }
     }
 
     @ViewBuilder
     private func destination(_ route: Route) -> some View {
         switch route {
         case .mistakeDrill(let occurrence):
-            MistakeDrillScreen(occurrence: occurrence) { solvedOne in
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { _ = solved.insert(solvedOne.id) }
-            }
+            MistakeDrillScreen(occurrence: occurrence, onSampleSolved: tick)
+        case .training(let queue):
+            MistakeDrillScreen(queue: queue, onSampleSolved: tick)
         case .explore(let start):
             ExploreScreen(start: start)
         default:
@@ -176,6 +181,11 @@ enum SampleMistakes {
         var opponent: String
         var daysAgo: Double
         var explanation: String
+        /// How long the move took, and the clock after it, in a 5-minute game.
+        var spent: TimeInterval
+        var remaining: TimeInterval
+        var opening: String
+        var scoreAfter: EngineScore
     }
 
     static let samples: [Sample] = [
@@ -183,39 +193,45 @@ enum SampleMistakes {
                played: "h2h3", san: "h3", best: "d1d8", bestSAN: "Rd8#", score: .mate(1),
                severity: .blunder, phase: .endgame, kinds: [.pattern(.missedMate)],
                opponent: "tempo_tina", daysAgo: 1,
-               explanation: "Rd8 was mate on the back rank."),
+               explanation: "Rd8 was mate on the back rank.",
+               spent: 3, remaining: 41, opening: "Queen's Gambit Declined", scoreAfter: .centipawns(-480)),
         Sample(gameKey: "sample-ng5", ply: 4, fen: "rnbqkbnr/ppp2ppp/3p4/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3",
                played: "f3g5", san: "Ng5", best: "d2d4", bestSAN: "d4", score: .centipawns(40),
                severity: .blunder, phase: .opening, kinds: [.pattern(.undefendedPiece)],
                opponent: "gambit_gus", daysAgo: 2,
-               explanation: "The knight on g5 is undefended, and the queen takes it."),
+               explanation: "The knight on g5 is undefended, and the queen takes it.",
+               spent: 2, remaining: 288, opening: "Philidor Defense", scoreAfter: .centipawns(-310)),
         Sample(gameKey: "sample-nxe5", ply: 5, fen: "r1bqkbnr/pppp1ppp/2n5/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq - 0 3",
                played: "g8f6", san: "Nf6", best: "c6e5", bestSAN: "Nxe5", score: .centipawns(-250),
                severity: .blunder, phase: .opening, kinds: [.pattern(.missedCapture)],
                opponent: "rookie_rook", daysAgo: 3,
-               explanation: "The knight on e5 was free to take."),
+               explanation: "The knight on e5 was free to take.",
+               spent: 6, remaining: 276, opening: "Petrov Defense", scoreAfter: .centipawns(-110)),
         Sample(gameKey: "sample-friedliver", ply: 7, fen: "r1bqkb1r/pppp1ppp/2n2n2/4p1N1/2B1P3/8/PPPP1PPP/RNBQK2R b KQkq - 5 4",
                played: "h7h6", san: "h6", best: "d7d5", bestSAN: "d5", score: .centipawns(30),
                severity: .mistake, phase: .opening, kinds: [.pattern(.allowedFork)],
                opponent: "endgame_ed", daysAgo: 5,
-               explanation: "Nxf7 forks the queen and the rook."),
+               explanation: "Nxf7 forks the queen and the rook.",
+               spent: 48, remaining: 201, opening: "Italian Game Two Knights Defense", scoreAfter: .centipawns(-160)),
         Sample(gameKey: "sample-scholar", ply: 5, fen: "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 3 3",
                played: "g8f6", san: "Nf6", best: "d8e7", bestSAN: "Qe7", score: .centipawns(-20),
                severity: .blunder, phase: .opening, kinds: [.pattern(.allowedMate)],
                opponent: "pawnstorm_ana", daysAgo: 7,
-               explanation: "Qxf7 is mate."),
+               explanation: "Qxf7 is mate.",
+               spent: 1, remaining: 292, opening: "Italian Game", scoreAfter: .mate(-1)),
         Sample(gameKey: "sample-najdorf", ply: 8, fen: "rnbqkb1r/pp2pppp/3p1n2/8/3NP3/8/PPP2PPP/RNBQKB1R w KQkq - 1 5",
                played: "f1d3", san: "Bd3", best: "b1c3", bestSAN: "Nc3", score: .centipawns(40),
                severity: .inaccuracy, phase: .opening, kinds: [.outcome(.evaluationLoss)],
                opponent: "tempo_tina", daysAgo: 9,
-               explanation: "Nc3 defends e4 and develops a piece."),
+               explanation: "Nc3 defends e4 and develops a piece.",
+               spent: 21, remaining: 240, opening: "Sicilian Defense Najdorf Variation", scoreAfter: .centipawns(-30)),
     ]
 
     /// One is already solved, to show what that looks like.
     static let initiallySolved: Set<String> = ["sample-nxe5#5"]
 
     static func occurrences(solved: Set<String>, now: Date = Date()) -> [MistakeOccurrence] {
-        samples.map { sample in
+        samples.map { sample -> MistakeOccurrence in
             let color: PieceColor = sample.fen.split(separator: " ").dropFirst().first == "w" ? .white : .black
             let moveNumber = Int(sample.fen.split(separator: " ").last ?? "") ?? 1
             return MistakeOccurrence(gameKey: sample.gameKey, ply: sample.ply, san: sample.san,
@@ -226,27 +242,23 @@ enum SampleMistakes {
                                      fenBefore: sample.fen, uci: sample.played, scoreBefore: sample.score,
                                      bestMoveUCI: sample.best, bestMoveSAN: sample.bestSAN,
                                      solvedAt: solved.contains("\(sample.gameKey)#\(sample.ply)") ? now : nil,
-                                     kinds: sample.kinds)
+                                     kinds: sample.kinds,
+                                     loss: sample.severity == .blunder ? 30 : sample.severity == .mistake ? 14 : 7,
+                                     scoreAfter: sample.scoreAfter.normalizedToWhite(mover: color),
+                                     bestLineUCI: [sample.best],
+                                     clock: MistakeClock(spent: sample.spent, remaining: sample.remaining, lowTime: 30, base: 300),
+                                     openingName: sample.opening,
+                                     // A solved sample comes back in three days, as a first clean solve would.
+                                     review: solved.contains("\(sample.gameKey)#\(sample.ply)")
+                                        ? MistakeReview(drills: 1, streak: 1, firstResult: "clean", lastResult: .clean,
+                                                        lastAt: now, dueAt: now.addingTimeInterval(3 * 86_400))
+                                        : nil)
         }
     }
 
     /// Counted the way the real backlog is: patterns first, then consequences, most frequent first.
     static func backlog(of occurrences: [MistakeOccurrence]) -> MistakeBacklog {
-        var counts: [MistakeCategory: (count: Int, solved: Int)] = [:]
-        var order: [MistakeCategory] = []
-        for occurrence in occurrences {
-            for kind in occurrence.kinds {
-                if counts[kind] == nil { order.append(kind) }
-                counts[kind, default: (0, 0)].count += 1
-                if occurrence.isSolved { counts[kind, default: (0, 0)].solved += 1 }
-            }
-        }
-        let kinds = order.enumerated().sorted { lhs, rhs in
-            if lhs.element.isPattern != rhs.element.isPattern { return lhs.element.isPattern }
-            let left = counts[lhs.element]!.count, right = counts[rhs.element]!.count
-            return left != right ? left > right : lhs.offset < rhs.offset
-        }.map { MistakeKindCount(category: $0.element, count: counts[$0.element]!.count, solved: counts[$0.element]!.solved) }
-        return MistakeBacklog(errors: occurrences.count, solved: occurrences.filter(\.isSolved).count, kinds: kinds)
+        MistakeBacklog(counting: occurrences)
     }
 
     static var breakdown: ErrorBreakdown {

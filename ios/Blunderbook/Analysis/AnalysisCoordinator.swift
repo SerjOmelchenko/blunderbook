@@ -16,6 +16,9 @@ enum AnalysisEvent: Sendable {
     case started(gameKey: String)
     /// `completed` of `total` units of work: searched positions, then scored plies.
     case progress(gameKey: String, completed: Int, total: Int)
+    /// The moves of a review the person asked for that are scored so far, in order, for showing
+    /// while the rest runs. Nothing is saved until the game is finished.
+    case partial(gameKey: String, moves: [MoveAnalysis])
     case finished(gameKey: String, plies: Int)
     case failed(gameKey: String, message: String)
     /// Stopped before the end. The game goes back to the queue and is analysed again from the
@@ -26,29 +29,105 @@ enum AnalysisEvent: Sendable {
 }
 
 /// Which engine a worker drives, and so which work it may take.
-enum EngineRole: Sendable, Equatable {
-    /// The performance-core engine: reviews the person asks for, and bulk work while the phone is
-    /// cool.
+enum EngineRole: Sendable, Hashable {
+    /// The first performance-core engine: reviews the person asks for, which borrow every other
+    /// engine, and bulk work while the device is cool.
     case performance
+    /// Another performance-core engine, counted from 2: lent to reviews the person asks for, and
+    /// nothing else, so bulk work never takes more than one performance core.
+    case performanceHelper(Int)
     /// An efficiency-core engine, counted from 1: bulk work only.
     case efficiency(Int)
 
     var name: String {
         switch self {
         case .performance: return "P"
+        case .performanceHelper(let index): return "P\(index)"
         case .efficiency(let index): return "E\(index)"
         }
     }
 }
 
-/// Lock-protected state the main actor uses to steer the engines without touching their
-/// internals. Blockers compose on the coordinator side; workers only read the result.
+/// Every engine of the device, and which of them is busy. A worker runs its own games on its own
+/// engine; a review the person asks for borrows all the others, so one game is split across the
+/// whole device. Engines load on first use, one at a time: each load briefly holds a private copy
+/// of the networks until it finds the shared one.
+final class EnginePool: @unchecked Sendable {
+    private let lock = NSLock()
+    private let loadLock = NSLock()
+    private let makeEngine: () -> ChessEngine?
+    private var engines: [EngineRole: ChessEngine]
+    private var unavailable: Set<EngineRole> = []
+    private var busy: Set<EngineRole> = []
+
+    init(performance: ChessEngine, makeEngine: @escaping () -> ChessEngine?) {
+        engines = [.performance: performance]
+        self.makeEngine = makeEngine
+    }
+
+    enum Taken {
+        case engine(ChessEngine)
+        /// Lent to a review the person asked for.
+        case busy
+        /// It could not load, and will not.
+        case unavailable
+    }
+
+    func take(_ role: EngineRole) -> Taken {
+        lock.lock()
+        if unavailable.contains(role) { lock.unlock(); return .unavailable }
+        if busy.contains(role) { lock.unlock(); return .busy }
+        busy.insert(role)
+        lock.unlock()
+        if let engine = load(role) { return .engine(engine) }
+        release([role])
+        return .unavailable
+    }
+
+    func release(_ roles: [EngineRole]) {
+        lock.lock()
+        roles.forEach { busy.remove($0) }
+        lock.unlock()
+    }
+
+    /// True while any of `roles` is analysing, apart from those that cannot load.
+    func isAnyBusy(_ roles: [EngineRole]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return roles.contains { busy.contains($0) }
+    }
+
+    /// Takes every engine among `roles` that is free, loading any not loaded yet.
+    func borrow(_ roles: [EngineRole]) -> [(role: EngineRole, engine: ChessEngine)] {
+        roles.compactMap { role in
+            if case .engine(let engine) = take(role) { return (role, engine) }
+            return nil
+        }
+    }
+
+    private func load(_ role: EngineRole) -> ChessEngine? {
+        lock.lock()
+        let loaded = engines[role]
+        lock.unlock()
+        if let loaded { return loaded }
+        loadLock.lock()
+        let engine = makeEngine()
+        loadLock.unlock()
+        lock.lock()
+        if let engine { engines[role] = engine } else { unavailable.insert(role) }
+        lock.unlock()
+        return engine
+    }
+}
+
 final class WorkerGate: @unchecked Sendable {
     private let lock = NSLock()
     private var blocked = true
     private var bulkAllowed = false
     private var currentPlan = ThermalPacing.Plan(performanceBulk: false, efficiencyEngines: 0)
     private var currentReviewDepth = ReviewDepth.default
+    private var reviewing = false
+    private var warm = false
 
     var isBlocked: Bool {
         get { lock.lock(); defer { lock.unlock() }; return blocked }
@@ -61,8 +140,8 @@ final class WorkerGate: @unchecked Sendable {
         set { lock.lock(); currentPlan = newValue; lock.unlock() }
     }
 
-    /// How hard the next deep review confirms its candidate errors. A game already running keeps
-    /// the level it started with.
+    /// How deeply the next deep review searches. A game already running keeps the level it
+    /// started with.
     var reviewDepth: ReviewDepth {
         get { lock.lock(); defer { lock.unlock() }; return currentReviewDepth }
         set { lock.lock(); currentReviewDepth = newValue; lock.unlock() }
@@ -73,25 +152,44 @@ final class WorkerGate: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return bulkAllowed }
         set { lock.lock(); bulkAllowed = newValue; lock.unlock() }
     }
+
+    /// True while the device reports itself warm (`ProcessInfo.ThermalState.fair`). A review the
+    /// person asked for then runs every engine at low priority, which keeps it on the cooler
+    /// efficiency cores, so it carries on more slowly instead of heating up until everything stops.
+    var isWarm: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return warm }
+        set { lock.lock(); warm = newValue; lock.unlock() }
+    }
+
+    /// True while a review the person asked for has, or is gathering, every engine: no other
+    /// worker takes a game meanwhile.
+    var isReviewing: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return reviewing }
+        set { lock.lock(); reviewing = newValue; lock.unlock() }
+    }
 }
 
 /// One engine and the loop that feeds it games, one game at a time. Several run side by side,
-/// each on its own engine; a game never depends on which of them analysed it, because every game
-/// starts from an engine that has forgotten everything (§5).
+/// each on its own engine; a game never depends on which of them analysed it, because every
+/// search starts from an engine that has forgotten everything (§5). The performance worker's
+/// reviews for the person also borrow every other worker's engine.
 final class AnalysisWorker: @unchecked Sendable {
     let role: EngineRole
     private let queue: QueueRepository
     private let games: GameRepository
     private let analyses: AnalysisRepository
     private let gate: WorkerGate
+    private let pool: EnginePool
+    private let cache: PositionCache?
     private let telemetry: AnalysisTelemetry.Channel?
-    private let makeEngine: () -> ChessEngine?
     private let onEvent: @Sendable (AnalysisEvent) -> Void
 
-    /// Created on the worker's own thread the first time it has work, so loading the networks
-    /// never blocks the interface.
-    private var engine: ChessEngine?
-    private var analyzer: GameAnalyzer?
+    /// The other workers, whose engines a review for the person borrows. Set before `run()`.
+    var others: [AnalysisWorker] = []
+
+    /// How long a review waits for the other engines to stop their bulk games before it starts
+    /// without the stragglers. A cancelled search stops within a fraction of a second.
+    private static let gatherSeconds: TimeInterval = 2
 
     private let lock = NSLock()
     private var cancellation = CancellationToken()
@@ -102,16 +200,18 @@ final class AnalysisWorker: @unchecked Sendable {
          games: GameRepository,
          analyses: AnalysisRepository,
          gate: WorkerGate,
+         pool: EnginePool,
+         cache: PositionCache?,
          telemetry: AnalysisTelemetry.Channel?,
-         makeEngine: @escaping () -> ChessEngine?,
          onEvent: @escaping @Sendable (AnalysisEvent) -> Void) {
         self.role = role
         self.queue = queue
         self.games = games
         self.analyses = analyses
         self.gate = gate
+        self.pool = pool
+        self.cache = cache
         self.telemetry = telemetry
-        self.makeEngine = makeEngine
         self.onEvent = onEvent
     }
 
@@ -124,13 +224,22 @@ final class AnalysisWorker: @unchecked Sendable {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 continue
             }
-            guard let analyzer = loadAnalyzer() else {
+            // Loaded on the worker's own thread the first time it has work, so loading the
+            // networks never blocks the interface.
+            switch pool.take(role) {
+            case .engine(let engine):
+                process(item, engine: engine)
+                pool.release([role])
+            case .busy:
+                // Lent to a review that started after the claim: the game waits for it.
+                try? queue.setState(.pending, id: item.id)
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            case .unavailable:
                 // This engine could not load. Its game goes back to the others, and it stops.
                 try? queue.setState(.pending, id: item.id)
                 telemetry?.event("engineUnavailable")
                 return
             }
-            process(item, analyzer: analyzer)
             await Task.yield()
         }
     }
@@ -154,22 +263,25 @@ final class AnalysisWorker: @unchecked Sendable {
         switch role {
         case .performance:
             return (try? queue.claimNextPendingItem(manual: true, bulk: gate.allowsBulk && plan.performanceBulk)) ?? nil
+        case .performanceHelper:
+            return nil
         case .efficiency(let index):
-            guard gate.allowsBulk, index <= plan.efficiencyEngines else { return nil }
+            guard gate.allowsBulk, index <= plan.efficiencyEngines, !gate.isReviewing else { return nil }
             return (try? queue.claimNextPendingItem(manual: false, bulk: true)) ?? nil
         }
     }
 
-    private func loadAnalyzer() -> GameAnalyzer? {
-        if let analyzer { return analyzer }
-        guard let engine = makeEngine() else { return nil }
-        let analyzer = GameAnalyzer(engine: engine, telemetry: telemetry)
-        self.engine = engine
-        self.analyzer = analyzer
-        return analyzer
+    /// Every other engine, once their bulk games have stopped: those go back to the queue.
+    private func gatherEngines() -> [(role: EngineRole, engine: ChessEngine)] {
+        gate.isReviewing = true
+        others.forEach { $0.preemptBulk() }
+        let roles = others.map(\.role)
+        let deadline = Date().addingTimeInterval(Self.gatherSeconds)
+        while pool.isAnyBusy(roles), Date() < deadline { usleep(20_000) }
+        return pool.borrow(roles)
     }
 
-    private func process(_ item: QueueItem, analyzer: GameAnalyzer) {
+    private func process(_ item: QueueItem, engine: ChessEngine) {
         guard let game = (try? games.game(key: item.gameKey)) ?? nil else {
             try? queue.setState(.failed, id: item.id, error: "The game is no longer stored")
             return
@@ -185,24 +297,65 @@ final class AnalysisWorker: @unchecked Sendable {
         // Blocked between the claim and here: the cancel that came meanwhile hit the old token.
         if gate.isBlocked { token.cancel() }
 
+        // A review the person asked for is split across every engine; bulk games use one each.
+        let isReview = !isBulk && role == .performance
+        let borrowed = isReview ? gatherEngines() : []
+        defer {
+            pool.release(borrowed.map(\.role))
+            if isReview { gate.isReviewing = false }
+        }
+
         // Scheduling only: the results never depend on which core ran them.
         switch role {
-        case .performance: engine?.setWorkload(isBulk ? .bulk : .interactive)
-        case .efficiency: engine?.setWorkload(.bulkCool)
+        case .performance: engine.setWorkload(isBulk ? .bulk : .interactive)
+        case .performanceHelper: engine.setWorkload(.interactive)
+        case .efficiency: engine.setWorkload(.bulkCool)
         }
+        // Efficiency-core engines stay below the person's own work even for their review, and every
+        // engine does while the device is warm; checked every second, and a change applies from
+        // each engine's next search. Each worker sets its own engine's workload again before its
+        // next game.
+        let pacing = isReview ? DispatchSource.makeTimerSource(queue: .global(qos: .utility)) : nil
+        if let pacing {
+            var wasWarm: Bool?
+            let fastEngines = [engine] + borrowed.filter { if case .efficiency = $0.role { return false } else { return true } }.map(\.engine)
+            let slowEngines = borrowed.filter { if case .efficiency = $0.role { return true } else { return false } }.map(\.engine)
+            slowEngines.forEach { $0.setWorkload(.bulkCool) }
+            pacing.schedule(deadline: .now(), repeating: 1)
+            pacing.setEventHandler { [gate] in
+                let warm = gate.isWarm
+                guard warm != wasWarm else { return }
+                wasWarm = warm
+                fastEngines.forEach { $0.setWorkload(warm ? .bulkCool : .interactive) }
+            }
+            pacing.resume()
+        }
+        defer { pacing?.cancel() }
         onEvent(.started(gameKey: item.gameKey))
         telemetry?.gameStarted(plies: game.plyCount, bulk: isBulk)
 
+        let fast = borrowed.filter { if case .efficiency = $0.role { return false } else { return true } }
+        let slow = borrowed.filter { if case .efficiency = $0.role { return true } else { return false } }
+        let analyzer = GameAnalyzer(engine: engine, helpers: fast.map(\.engine), slowHelpers: slow.map(\.engine),
+                                    cache: cache, telemetry: telemetry)
         var lastProgress = Date.distantPast
+        var lastPartial = Date.distantPast
         do {
             let result = try analyzer.analyze(game: game, deep: isDeep, reviewDepth: gate.reviewDepth,
-                                              cancellation: token) { [onEvent] completed, total in
+                                              cancellation: token,
+                                              onProgress: { [onEvent] completed, total in
                 // For display only; a few updates a second are plenty.
                 let now = Date()
                 guard completed == total || now.timeIntervalSince(lastProgress) >= 0.25 else { return }
                 lastProgress = now
                 onEvent(.progress(gameKey: item.gameKey, completed: completed, total: total))
-            }
+            }, onPartial: isReview ? { [onEvent] moves in
+                // Only the game the person is looking at, a few times a second at most.
+                let now = Date()
+                guard moves.count == game.plyCount || now.timeIntervalSince(lastPartial) >= 0.25 else { return }
+                lastPartial = now
+                onEvent(.partial(gameKey: item.gameKey, moves: moves))
+            } : nil)
             try analyses.save(result)
             try queue.setState(.completed, id: item.id, checkpointPly: result.nextPly)
             telemetry?.gameEnded(outcome: "finished")
@@ -245,6 +398,8 @@ final class AnalysisCoordinator {
     private(set) var counts = QueueCounts()
     /// Games being analysed right now, one per busy engine.
     private(set) var activeGames: [String: ActiveGame] = [:]
+    /// The scored moves of reviews the person asked for, while they run (`AnalysisEvent.partial`).
+    private(set) var partialReviews: [String: [MoveAnalysis]] = [:]
     private(set) var lastFailureMessage: String?
     private(set) var blockers: Set<QueueBlocker> = []
     /// True while heat keeps bulk work below the phone's full set of engines.
@@ -333,31 +488,28 @@ final class AnalysisCoordinator {
     ///   - engine: the performance-core engine, already loaded.
     ///   - makeEngine: loads one more engine; each efficiency-core worker calls it on its own
     ///     thread the first time it has work.
-    func start(engine: ChessEngine, makeEngine: @escaping () -> ChessEngine?) {
+    func start(engine: ChessEngine, makeEngine: @escaping () -> ChessEngine?, cache: PositionCache? = nil) {
         guard workerTasks.isEmpty else { return }
         try? queue.recoverInterruptedItems()
         try? queue.adoptCurrentPolicy()
 
-        // One engine loads at a time. Each load holds a private copy of the networks until it
-        // finds the shared one, so loading four at once would briefly need four copies.
-        let loadLock = NSLock()
-        let loadOneAtATime: () -> ChessEngine? = {
-            loadLock.lock()
-            defer { loadLock.unlock() }
-            return makeEngine()
-        }
-
-        let roles = [EngineRole.performance] + (1...efficiencyLimit.maximum).map { EngineRole.efficiency($0) }
+        let pool = EnginePool(performance: engine, makeEngine: makeEngine)
+        let roles = [EngineRole.performance]
+            + (1..<ThermalPacing.performanceEngineCount).map { EngineRole.performanceHelper($0 + 1) }
+            + (1...efficiencyLimit.maximum).map { EngineRole.efficiency($0) }
         for role in roles {
             let worker = AnalysisWorker(role: role, queue: queue, games: games, analyses: analyses,
-                                        gate: gate, telemetry: telemetry?.channel(role.name),
-                                        makeEngine: role == .performance ? { engine } : loadOneAtATime) { [weak self] event in
+                                        gate: gate, pool: pool, cache: cache,
+                                        telemetry: telemetry?.channel(role.name)) { [weak self] event in
                 // The main queue keeps each worker's events in order; tasks would not.
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated { self?.handle(event) }
                 }
             }
             workers.append(worker)
+        }
+        for worker in workers {
+            worker.others = workers.filter { $0 !== worker }
             workerTasks.append(Task.detached(priority: .utility) { await worker.run() })
         }
 
@@ -475,8 +627,8 @@ final class AnalysisCoordinator {
         Task { await refreshCounts() }
     }
 
-    /// Adds a single review ahead of any bulk work. It runs on the performance-core engine, which
-    /// drops any bulk game it is on; that game goes back to the queue.
+    /// Adds a single review ahead of any bulk work. The performance-core engine takes it and borrows
+    /// every other engine; bulk games they were on go back to the queue.
     ///
     /// A user pause is deliberately *not* lifted here: §7 says only an explicit Resume clears it.
     /// The item is queued at manual priority and the caller tells the person the queue is paused.
@@ -488,15 +640,6 @@ final class AnalysisCoordinator {
         Task { await refreshCounts() }
         if !isPausedByUser { onUserStartedWork?() }
         return id
-    }
-
-    /// A hundred-game batch gets the same in-depth review as a game opened on its own.
-    func enqueueBulk(playerID: UUID, label: String, gameKeys: [String]) throws {
-        try queue.createBatch(playerID: playerID, label: label,
-                              entries: gameKeys.map { (gameKey: $0, bucket: AllowanceBucket.none) },
-                              policyID: DeepReview.identifier)
-        Task { await refreshCounts() }
-        if !isPausedByUser { onUserStartedWork?() }
     }
 
     // MARK: - State
@@ -512,16 +655,21 @@ final class AnalysisCoordinator {
         case .progress(let key, let completed, let total):
             activeGames[key]?.completed = completed
             activeGames[key]?.total = total
+        case .partial(let key, let moves):
+            partialReviews[key] = moves
         case .finished(let key, let plies):
             activeGames[key] = nil
+            partialReviews[key] = nil
             recordThroughput(plies: plies)
             Task { await refreshCounts() }
         case .failed(let key, let message):
             lastFailureMessage = message
             activeGames[key] = nil
+            partialReviews[key] = nil
             Task { await refreshCounts() }
         case .interrupted(let key):
             activeGames[key] = nil
+            partialReviews[key] = nil
         case .idle:
             break
         }
@@ -570,10 +718,12 @@ final class AnalysisCoordinator {
 
         // Learn from heat before the thermal blocker stops the games that caused it.
         efficiencyLimit.update(thermal: conditions.thermalState, isWorking: !activeGames.isEmpty)
-        let plan = ThermalPacing.plan(thermal: conditions.thermalState, efficiencyEngines: efficiencyLimit.value)
+        let plan = ThermalPacing.plan(thermal: conditions.thermalState, efficiencyEngines: efficiencyLimit.value,
+                                      inBackground: UIApplication.shared.applicationState == .background)
         gate.plan = plan
         isPacing = !plan.performanceBulk || plan.efficiencyEngines < efficiencyLimit.maximum
 
+        gate.isWarm = conditions.thermalState != .nominal
         let blocked = !result.isEmpty || isSuspendedForBackground
         gate.isBlocked = blocked
         if blocked {

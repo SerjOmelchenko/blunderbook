@@ -9,7 +9,7 @@
 
 import Foundation
 
-/// The analysis every game gets, one at a time or a hundred at once.
+/// The analysis every game gets.
 ///
 /// **eval-v1**: Stockfish searches every position of a game once, from a cleared hash, and its
 /// evaluation and line are stored as they come. Nothing else is computed or kept: no move labels,
@@ -58,24 +58,21 @@ enum AnalysisPolicy {
     }
 }
 
-/// The deep review of one game, run only when the person asks for it: the labelled analysis the
-/// app ran for every game before eval-v1 (`standard-v2`).
+/// The deep review of one game: the labelled analysis behind the game review, the Mistakes tab and
+/// the accuracy rings.
 ///
-/// Every position is searched at `standardNodes`. When a move looks like an error, both positions
-/// around it are searched again at the chosen `ReviewDepth` before it is labelled. Each move then gets
-/// a loss, an accuracy, a severity, a phase, and the patterns a line on the board demonstrates;
-/// the engine's preferred move and line are kept for the board arrow. A deep review is a complete
-/// review too: it keeps every evaluation a standard one would, so it replaces one, and a standard
-/// analysis never replaces a deep review.
+/// Changed 2026-10-12: every position is searched once at the chosen level's budget, the way
+/// Lichess analyses a game, and each move is scored from the two searches around it. There is no
+/// quick first pass and no confirmation search: a quick pass could only confirm errors it noticed,
+/// and on real games it missed some that a deeper search sees at once. Reviews made before keep
+/// their labels; each saved move records the nodes behind it.
+///
+/// Each move gets a loss, an accuracy, a severity, a phase, and the patterns a line on the board
+/// demonstrates; the engine's preferred move and line are kept for the board arrow. A deep review
+/// keeps every evaluation a standard one would, so it replaces one, and a standard analysis never
+/// replaces a deep review.
 enum DeepReview {
     static let identifier = "deep-v1"
-
-    /// Nodes per position.
-    static let standardNodes = 100_000
-    /// Win-percentage points of loss that trigger a confirmation pair.
-    static let confirmationLossThreshold = 5.0
-    /// Improvement in the after-evaluation that also triggers confirmation.
-    static let confirmationImprovementThreshold = 5.0
 
     static let scoringIdentifier = "winpct-2026"
     static let taggerIdentifier = "detectors-2"
@@ -83,30 +80,32 @@ enum DeepReview {
     static func isDeep(policyID: String) -> Bool { policyID == identifier }
 }
 
-/// How hard a deep review checks a move that looks like an error: the nodes for each of the two
-/// confirmation searches around it. The person picks it in Settings, and it applies to reviews run
-/// after the change; reviews already saved keep their labels.
+/// How deeply a deep review searches: the nodes for every position. The person picks the level in
+/// Settings, and it applies to reviews run after the change; reviews already saved keep their
+/// labels. Measured 2026-10-11 on 9 real games against 8M-node searches, which found 158 errors:
+/// 500k found 136 of them, 1.5M 141, 2M 144.
 ///
-/// Searches stay node-limited, so a result never depends on the phone's speed. The depth shown is
-/// what that budget typically reaches on positions from real games; a sharp position reaches less.
+/// Searches stay node-limited, so a result never depends on the phone's speed, and neither does the
+/// depth a budget reaches; only the time does.
 ///
 /// The two deepest levels are Premium. Without it, a deeper choice stays saved but reviews run at
 /// `deepestFree`, so subscribing again picks up where the person left off.
 enum ReviewDepth: String, CaseIterable, Identifiable, Sendable {
-    case fast
-    case balanced
+    case quick
+    case standard
     case deep
     case deepest
 
-    static let `default` = ReviewDepth.fast
+    /// About what Lichess gives every position of a game it analyses.
+    static let `default` = ReviewDepth.standard
     /// The deepest level the free plan runs.
-    static let deepestFree = ReviewDepth.balanced
+    static let deepestFree = ReviewDepth.standard
 
     var id: String { rawValue }
 
     var requiresPremium: Bool {
         switch self {
-        case .fast, .balanced: return false
+        case .quick, .standard: return false
         case .deep, .deepest: return true
         }
     }
@@ -116,42 +115,59 @@ enum ReviewDepth: String, CaseIterable, Identifiable, Sendable {
         isPremium || !requiresPremium ? self : Self.deepestFree
     }
 
-    var confirmationNodes: Int {
+    var title: String {
         switch self {
-        case .fast: return 500_000
-        case .balanced: return 2_000_000
-        case .deep: return 5_000_000
-        case .deepest: return 10_000_000
+        case .quick: return "Quick"
+        case .standard: return "Standard"
+        case .deep: return "Deep"
+        case .deepest: return "Deepest"
         }
     }
 
-    /// Median depth reached on 25 confirmed positions from real games (measured 2026-10-10).
+    /// Nodes for every position.
+    var nodesPerPosition: Int {
+        switch self {
+        case .quick: return 500_000
+        case .standard: return 1_500_000
+        case .deep: return 3_000_000
+        case .deepest: return 6_000_000
+        }
+    }
+
+    /// Median depth over the 119 positions of a 59-move rapid game, with the bundled network
+    /// (measured 2026-10-12; the same on the phone and the Mac). A sharp position reaches less.
     var typicalDepth: Int {
         switch self {
-        case .fast: return 19
-        case .balanced: return 23
-        case .deep: return 26
-        case .deepest: return 29
+        case .quick: return 19
+        case .standard: return 22
+        case .deep: return 25
+        case .deepest: return 28
         }
     }
 
-    var title: String { "Depth \(typicalDepth)" }
-
-    /// Rough time for a deep review of a 65-ply game on a recent iPhone's performance core.
+    /// Time for a 40-move game (81 positions) on one performance core of an iPhone 16 Pro. Measured
+    /// 2026-10-12 at 0.44 s a position for 500k, 1.81 s for 2M and 4.78 s for 5M; the other budgets
+    /// are in proportion (about 0.95 s per million nodes).
     var timePerGame: String {
         switch self {
-        case .fast: return "about 10 s a game"
-        case .balanced: return "about 30 s a game"
-        case .deep: return "about 1 min a game"
-        case .deepest: return "about 2 min a game"
+        case .quick: return "About 40 s a game"
+        case .standard: return "About 2 min a game"
+        case .deep: return "About 4 min a game"
+        case .deepest: return "About 8 min a game"
         }
     }
 
     var nodesLabel: String {
-        confirmationNodes >= 1_000_000
-            ? "\(confirmationNodes / 1_000_000)M nodes"
-            : "\(confirmationNodes / 1_000)k nodes"
+        switch self {
+        case .quick: return "500k nodes"
+        case .standard: return "1.5M nodes"
+        case .deep: return "3M nodes"
+        case .deepest: return "6M nodes"
+        }
     }
+
+    /// Two lines for the Settings row: the search, then the time.
+    var summary: String { "\(nodesLabel) per position · depth ~\(typicalDepth)\n\(timePerGame)" }
 }
 
 struct AnalysisProvenance: Hashable, Codable {
@@ -259,7 +275,11 @@ enum Scoring {
     /// A plain mean would hide errors: most moves score 95–100, so three blunders in thirty
     /// moves still average about 88. The positions are each move's stored before-score plus the
     /// last move's after-score; each move's accuracy is its own stored one.
-    static func gameAccuracies(_ moves: [MoveAnalysis]) -> (white: Double?, black: Double?) {
+    ///
+    /// `including` narrows the moves scored, such as to one phase, while the weights still come
+    /// from the whole game's swings.
+    static func gameAccuracies(_ moves: [MoveAnalysis],
+                               including: (MoveAnalysis) -> Bool = { _ in true }) -> (white: Double?, black: Double?) {
         guard let last = moves.last else { return (nil, nil) }
         let series = moves.map { winPercent($0.scoreBefore) } + [winPercent(last.scoreAfter)]
         let window = max(2, min(8, moves.count / 10))
@@ -270,7 +290,7 @@ enum Scoring {
 
         func accuracy(for color: PieceColor) -> Double? {
             let scored = moves.enumerated().compactMap { index, move in
-                move.mover == color ? move.labels.map { ($0.accuracy, weights[index]) } : nil
+                move.mover == color && including(move) ? move.labels.map { ($0.accuracy, weights[index]) } : nil
             }
             guard !scored.isEmpty else { return nil }
             let weighted = scored.reduce(0) { $0 + $1.0 * $1.1 } / scored.reduce(0) { $0 + $1.1 }

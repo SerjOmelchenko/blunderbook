@@ -18,6 +18,12 @@ struct BoardPresentation: Equatable {
     var suggestedMove: Move?
     /// Drawn as a red arrow — a move the player got wrong, shown in the position it was played in.
     var mistakeMove: Move?
+    /// Drawn as a red arrow that arrives with the move — the reply that punishes the move just
+    /// played, in the position after it.
+    var threatMove: Move?
+    /// Squares ringed as the move lands: what a pattern is about, such as the pieces a fork hits.
+    var targetRings: [Int] = []
+    var ringColor: Color = Palette.blunder
     /// The piece picked up on a board that takes moves, and the squares it can go to.
     var selectedSquare: Int?
     var targetSquares: [Int] = []
@@ -159,6 +165,10 @@ struct BoardView: View {
             .overlay {
                 LineArrowsLayer(moves: presentation.lineArrows, orientation: presentation.orientation, square: square)
             }
+            .overlay {
+                TargetRingsLayer(squares: presentation.targetRings, color: presentation.ringColor,
+                                 orientation: presentation.orientation, square: square)
+            }
             .frame(width: side, height: side)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -227,6 +237,59 @@ private struct LineArrowsLayer: View {
     }
 
     static func shaftWidth(rank: Int) -> CGFloat { [0.17, 0.13, 0.11][min(rank, 2)] }
+}
+
+/// Rings around the squares a pattern is about. Each tightens onto its square as the move lands,
+/// then breathes for a few seconds, so the eye finds it without the board flashing.
+private struct TargetRingsLayer: View {
+    let squares: [Int]
+    let color: Color
+    let orientation: PieceColor
+    let square: CGFloat
+
+    var body: some View {
+        let geometry = BoardGeometry(orientation: orientation)
+        ZStack(alignment: .topLeading) {
+            ForEach(squares, id: \.self) { target in
+                TargetRing(color: color, size: square)
+                    .position(geometry.centre(of: target, size: square))
+                    .id("\(target)-\(orientation)")
+            }
+        }
+        .frame(width: square * 8, height: square * 8, alignment: .topLeading)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct TargetRing: View {
+    let color: Color
+    let size: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hasLanded = false
+    @State private var breaths = 0
+
+    var body: some View {
+        Circle()
+            .strokeBorder(color, lineWidth: max(2, size * 0.055))
+            .shadow(color: color.opacity(0.7), radius: size * 0.12)
+            .frame(width: size * 0.88, height: size * 0.88)
+            .scaleEffect(hasLanded ? 1 : 1.45)
+            .opacity(hasLanded ? 1 : 0)
+            .phaseAnimator([1.0, 0.45], trigger: breaths) { content, opacity in
+                content.opacity(opacity)
+            } animation: { _ in .easeInOut(duration: 0.85) }
+            .task {
+                // Lands with the move, then breathes three times.
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.45)) { hasLanded = true }
+                guard !reduceMotion else { return }
+                for _ in 0..<3 {
+                    try? await Task.sleep(nanoseconds: 1_700_000_000)
+                    breaths += 1
+                }
+            }
+    }
 }
 
 /// How an engine line's arrow looks, shared with the line's row so the two read as a pair.
@@ -354,6 +417,12 @@ private struct AnimatedBoardCanvas: View, Animatable {
         }
         if let mistake = presentation.mistakeMove {
             drawArrow(in: &context, move: mistake, size: size, color: Palette.blunder.opacity(0.8))
+        }
+        if let threat = presentation.threatMove {
+            // A beat after the better move, so the two read in order: what to play, what it cost.
+            var faded = context
+            faded.opacity = max(0, (arrival - 0.25) / 0.75)
+            drawArrow(in: &faded, move: threat, size: size, color: Palette.blunder.opacity(0.82))
         }
         if let badge = presentation.badge {
             drawBadge(in: &context, badge: badge, size: size, arrival: arrival)

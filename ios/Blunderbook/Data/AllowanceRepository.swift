@@ -10,8 +10,8 @@
 import Foundation
 
 /// The free plan. Analysing any single game you open is free and unlimited. Premium adds the
-/// Mistakes tab, the two deepest review depths (`ReviewDepth.requiresPremium`), analysing a
-/// hundred games in one go, and any number of tracked players.
+/// Mistakes tab, the two deepest review depths (`ReviewDepth.requiresPremium`) and any number
+/// of tracked players.
 enum FreePlan {
     /// How many players can be tracked without a subscription. A Chess.com and a Lichess account
     /// are two players. Players tracked before a limit applied are kept; only adding is blocked.

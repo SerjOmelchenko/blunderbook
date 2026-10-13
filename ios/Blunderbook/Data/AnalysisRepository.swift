@@ -342,24 +342,6 @@ final class AnalysisRepository {
         return total
     }
 
-    /// The games among `keys`, in their order, with no complete review under any policy.
-    /// Queried in chunks, because SQLite caps the number of bound parameters; checking only the
-    /// first chunk would re-queue every reviewed game beyond it.
-    func withoutDeepReview(_ keys: [String]) throws -> [String] {
-        let chunkSize = 900
-        var reviewed = Set<String>()
-        for start in stride(from: 0, to: keys.count, by: chunkSize) {
-            let slice = keys[start..<min(start + chunkSize, keys.count)]
-            let placeholders = Array(repeating: "?", count: slice.count).joined(separator: ",")
-            let rows = try database.query("""
-                SELECT DISTINCT game_key AS value FROM analyses
-                WHERE status = 'complete' AND policy_id = ? AND game_key IN (\(placeholders));
-                """, [DeepReview.identifier.sqlValue] + slice.map { $0.sqlValue })
-            reviewed.formUnion(rows.compactMap { $0.string("value") })
-        }
-        return keys.filter { !reviewed.contains($0) }
-    }
-
     /// Games with a complete review, under any policy.
     func completedCount() throws -> Int {
         try database.queryOne("SELECT COUNT(DISTINCT game_key) AS value FROM analyses WHERE status = 'complete';")?

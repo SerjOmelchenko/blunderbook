@@ -46,10 +46,8 @@ struct PaywallScreen: View {
                             Hairline()
                             comparisonRow("Mistakes tab and puzzles", free: "No", premium: "Yes")
                             Hairline()
-                            comparisonRow("Review depth", free: "Up to \(ReviewDepth.deepestFree.typicalDepth)",
-                                          premium: "Up to \(ReviewDepth.deepest.typicalDepth)")
-                            Hairline()
-                            comparisonRow("Analyse \(AppModel.bulkBatchSize) games at once", free: "No", premium: "Yes")
+                            comparisonRow("Review depth", free: "Up to \(ReviewDepth.deepestFree.title)",
+                                          premium: "Up to \(ReviewDepth.deepest.title)")
                             Hairline()
                             comparisonRow("Tracked players", free: "\(FreePlan.maxPlayers)", premium: "Unlimited")
                             Hairline()
@@ -258,9 +256,9 @@ struct SubscriptionScreen: View {
         case .unknown:
             return "The App Store has not answered yet. Saved reviews are unaffected and purchase-dependent work is paused until it does."
         case .free:
-            return "Every game you open is analysed in depth, free, up to \(ReviewDepth.deepestFree.title.lowercased()), for \(FreePlan.playersDescription). Premium adds the Mistakes tab, \(ReviewDepth.deep.title.lowercased()) and \(ReviewDepth.deepest.title.lowercased()), analysing \(AppModel.bulkBatchSize) games at once, and any number of players."
+            return "Every game you open is analysed in depth, free, at up to \(ReviewDepth.deepestFree.title) depth, for \(FreePlan.playersDescription). Premium adds the Mistakes tab, the \(ReviewDepth.deep.title) and \(ReviewDepth.deepest.title) review depths, and any number of players."
         case .subscribed:
-            return "Everything is unlocked: the Mistakes tab, \(ReviewDepth.deep.title.lowercased()) and \(ReviewDepth.deepest.title.lowercased()), analysing \(AppModel.bulkBatchSize) games at once, and any number of players."
+            return "Everything is unlocked: the Mistakes tab, the \(ReviewDepth.deep.title) and \(ReviewDepth.deepest.title) review depths, and any number of players."
         case .trial:
             return "The free trial includes everything Premium does. It becomes the monthly plan when it ends, unless you cancel before then in Manage subscription."
         case .grace:

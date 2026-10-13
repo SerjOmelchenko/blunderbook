@@ -104,6 +104,8 @@ final class PlayerRepository {
             try database.runUnsafe("""
                 DELETE FROM games WHERE game_key NOT IN (SELECT game_key FROM player_games);
                 """)
+            // The cache holds the openings of their games: it goes with the last player.
+            try database.runUnsafe("DELETE FROM position_cache WHERE NOT EXISTS (SELECT 1 FROM players);")
         }
     }
 
@@ -351,8 +353,10 @@ final class GameRepository {
                ) ELSE 0 END AS a_errors,
                CASE WHEN \(isCompleteDeep) THEN (
                    SELECT COUNT(*) FROM move_labels l
-                   JOIN solved_mistakes s ON s.game_key = pg.game_key AND s.ply = l.ply
                    WHERE l.analysis_id = a.id AND l.mover = pg.color AND l.severity IS NOT NULL
+                     AND (EXISTS (SELECT 1 FROM solved_mistakes s WHERE s.game_key = pg.game_key AND s.ply = l.ply)
+                          OR EXISTS (SELECT 1 FROM mistake_reviews r
+                                     WHERE r.game_key = pg.game_key AND r.ply = l.ply AND r.ignored = 1))
                ) ELSE 0 END AS a_solved,
                EXISTS (SELECT 1 FROM queue_items q
                        WHERE q.game_key = pg.game_key AND q.state IN ('pending', 'running')) AS q_active

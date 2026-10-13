@@ -51,7 +51,7 @@ struct SettingsSheet: View {
                     group("Analysis") {
                         NavigationLink { ReviewDepthScreen() } label: {
                             DetailRow(title: "Review depth",
-                                      subtitle: "How deeply a possible mistake is checked") {
+                                      subtitle: "How deeply every position is searched") {
                                 Text(model.coordinator.effectiveReviewDepth.title)
                                     .font(.footnote)
                                     .foregroundStyle(Palette.inkSecondary)
@@ -574,9 +574,9 @@ struct StorageScreen: View {
 
 // MARK: - W26 How analysis works
 
-/// The four confirmation budgets of a deep review, deepest last. The choice applies to reviews run
-/// after it; saved reviews keep their labels. The two deepest are Premium: on the free plan they
-/// carry a lock and open the plan instead.
+/// The four search budgets of a deep review, deepest last. The choice applies to reviews run after
+/// it; saved reviews keep their labels. The two deepest are Premium: on the free plan they carry a
+/// lock and open the plan instead.
 struct ReviewDepthScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.showPaywall) private var showPaywall
@@ -593,7 +593,7 @@ struct ReviewDepthScreen: View {
                     }
                 }
 
-                Text("Every position is searched at \(DeepReview.standardNodes.formatted()) nodes. When a move looks like a mistake, the positions before and after it are searched again at this depth before it gets a label. Deeper checks match a long engine analysis more closely, mostly in sharp positions, and take longer. A new depth applies to games reviewed from now on. \(ReviewDepth.deep.title) and \(ReviewDepth.deepest.title) come with Premium.")
+                Text("Stockfish searches every position of a game with this many nodes, then scores each move from the positions before and after it. \(ReviewDepth.standard.title) gives each position about what Lichess does. Deeper levels judge close moves more exactly and take longer. Times are for a 40-move game on an iPhone 16 Pro. A new level applies to games reviewed from now on; games already reviewed keep their labels. \(ReviewDepth.deep.title) and \(ReviewDepth.deepest.title) come with Premium.")
                     .font(.footnote)
                     .foregroundStyle(Palette.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -614,7 +614,7 @@ struct ReviewDepthScreen: View {
             if isLocked { showPaywall() } else { model.coordinator.reviewDepth = depth }
         } label: {
             DetailRow(title: depth == .default ? "\(depth.title) · default" : depth.title,
-                      subtitle: "\(depth.nodesLabel) · \(depth.timePerGame)",
+                      subtitle: depth.summary,
                       showsChevron: false) {
                 if isLocked {
                     Label("Premium", systemImage: "lock.fill")
@@ -656,7 +656,7 @@ struct HowAnalysisWorksScreen: View {
                         "Open any position and Stockfish searches it again live, deeper, and shows its three best lines.")
 
                 section("In depth, for every game",
-                        "Open a game, or analyse a hundred at a time, and each one is analysed in depth, with every move scored. Each position is searched at \(DeepReview.standardNodes.formatted()) nodes; when a move looks like an error, both positions around it are searched again at \(model.coordinator.effectiveReviewDepth.confirmationNodes.formatted()) nodes (\(model.coordinator.effectiveReviewDepth.title.lowercased()), set in Settings) before it is labelled. A move's loss is how many points of the bar it gave away, never less than zero.")
+                        "Open a game and it is analysed in depth, with every move scored. Stockfish searches every position at \(model.coordinator.effectiveReviewDepth.nodesPerPosition.formatted()) nodes (\(model.coordinator.effectiveReviewDepth.title), set in Settings under Review depth), and each move is scored from the positions before and after it. A move's loss is how many points of the bar it gave away, never less than zero.")
 
                 thresholds
 
@@ -664,13 +664,13 @@ struct HowAnalysisWorksScreen: View {
                         "The opening is named from the Lichess opening list, about 3,900 named lines, and follows the game move by move. A move counts as book while every move so far has stayed on a known line, by any move order. A book move is never called an inaccuracy or a mistake, but it is still called a blunder when it is one: the list names traps too, such as Fool's Mate.")
 
                 section("Accuracy",
-                        "In a deep review a move with no loss scores 100. Otherwise accuracy = clamp(103.1668 \u{00D7} e^(\u{2212}0.04354 \u{00D7} loss) \u{2212} 3.1669, 0, 100). A colour's game accuracy is the plain arithmetic mean of its move accuracies. This is this app's own aggregation and is not comparable to any other site's score. In an already-decided position accuracy can be very high, because there is little left to lose.")
+                        "In a deep review a move with no loss scores 100. Otherwise accuracy = clamp(103.1668 \u{00D7} e^(\u{2212}0.04354 \u{00D7} loss) \u{2212} 3.1669 + 1, 0, 100). A colour's game accuracy follows Lichess's published method: the average of two means of its move accuracies, one weighted by how much the position was swinging and one harmonic, so every bad move counts. It is computed from this app's own analysis, so it will not match any site's number. In an already-decided position accuracy can be very high, because there is little left to lose.")
 
                 section("Evidence, not guesses",
                         "A pattern is only attached when a line on the board demonstrates it. If a line does not resolve inside 12 plies, or compensation is unclear, the app says the evaluation dropped and shows the line — it does not invent a cause.")
 
                 section("What the free plan covers",
-                        "Any game you open is analysed in depth, free, as often as you like, up to \(ReviewDepth.deepestFree.title.lowercased()), for \(FreePlan.playersDescription). Premium adds the Mistakes tab, \(ReviewDepth.deep.title.lowercased()) and \(ReviewDepth.deepest.title.lowercased()), analysing \(AppModel.bulkBatchSize) games in one go, and any number of players. Every review you run is kept for good, on either plan.")
+                        "Any game you open is analysed in depth, free, as often as you like, at up to \(ReviewDepth.deepestFree.title) depth, for \(FreePlan.playersDescription). Premium adds the Mistakes tab, the \(ReviewDepth.deep.title) and \(ReviewDepth.deepest.title) review depths, and any number of players. Every review you run is kept for good, on either plan.")
 
                 section("What it cannot tell you",
                         "Nothing here infers intent, nerves, disconnection or cheating. A recorded result is never substituted for an evaluation: a win on time is not checkmate.")

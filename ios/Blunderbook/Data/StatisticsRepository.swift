@@ -140,11 +140,47 @@ struct MistakeOccurrence: Hashable, Identifiable {
     var solvedAt: Date?
     /// What kind of mistake it was: its patterns, or its consequence when no pattern applies.
     var kinds: [MistakeCategory] = []
+    /// What the move cost, in win-percentage points, and the evaluation after it (White's frame).
+    var loss: Double = 0
+    var scoreAfter: EngineScore = .centipawns(0)
+    /// The engine's line from `fenBefore`, and its line after the move played: how it was punished.
+    var bestLineUCI: [String] = []
+    var replyLineUCI: [String] = []
+    /// The clock around the move, from the PGN; nil for a daily game or a PGN without clocks.
+    var clock: MistakeClock?
+    /// The provider's name for the game's opening.
+    var openingName: String?
+    /// How it has gone in drills on the Mistakes tab; nil before its first.
+    var review: MistakeReview?
+    /// The same position from other games, when the player went wrong there more than once.
+    /// Solving this one solves them all.
+    var repeats: [MistakeRef] = []
+    /// True when every repeat was the same move.
+    var repeatsSameMove = false
     var id: String { "\(gameKey)#\(ply)" }
+    var ref: MistakeRef { MistakeRef(gameKey: gameKey, ply: ply) }
 
     var isSolved: Bool { solvedAt != nil }
     var move: Move? { Move.fromUCI(uci) }
     var bestMove: Move? { bestMoveUCI.flatMap(Move.fromUCI) }
+}
+
+/// One mistake, by its game and move.
+struct MistakeRef: Hashable {
+    var gameKey: String
+    var ply: Int
+}
+
+/// The clock around one mistake.
+struct MistakeClock: Hashable {
+    /// How long the move took.
+    var spent: TimeInterval?
+    /// The mover's clock after it.
+    var remaining: TimeInterval?
+    /// Under this the player was short of time (`GameClock.lowTime`).
+    var lowTime: TimeInterval
+    /// The game's starting time, in seconds.
+    var base: TimeInterval
 }
 
 /// How many errors carry one kind, and how many of those are solved.
@@ -161,6 +197,28 @@ struct MistakeBacklog: Hashable {
     var errors = 0
     var solved = 0
     var kinds: [MistakeKindCount] = []
+}
+
+extension MistakeBacklog {
+    /// Counted the way `StatisticsRepository.mistakeBacklog` counts: patterns first, then
+    /// consequences, most frequent first.
+    init(counting occurrences: [MistakeOccurrence]) {
+        var counts: [MistakeCategory: (count: Int, solved: Int)] = [:]
+        var order: [MistakeCategory] = []
+        for occurrence in occurrences {
+            for kind in occurrence.kinds {
+                if counts[kind] == nil { order.append(kind) }
+                counts[kind, default: (0, 0)].count += 1
+                if occurrence.isSolved { counts[kind, default: (0, 0)].solved += 1 }
+            }
+        }
+        let kinds = order.enumerated().sorted { lhs, rhs in
+            if lhs.element.isPattern != rhs.element.isPattern { return lhs.element.isPattern }
+            let left = counts[lhs.element]!.count, right = counts[rhs.element]!.count
+            return left != right ? left > right : lhs.offset < rhs.offset
+        }.map { MistakeKindCount(category: $0.element, count: counts[$0.element]!.count, solved: counts[$0.element]!.solved) }
+        self.init(errors: occurrences.count, solved: occurrences.filter(\.isSolved).count, kinds: kinds)
+    }
 }
 
 struct AnalyticsCoverage: Hashable {
@@ -425,7 +483,7 @@ final class StatisticsRepository {
         return backlog
     }
 
-    private static func kinds(_ row: SQLRow) -> [MistakeCategory] {
+    static func kinds(_ row: SQLRow) -> [MistakeCategory] {
         let tags = Set((row.string("tags") ?? "").split(separator: " ").compactMap { PatternTag(rawValue: String($0)) })
         return MistakeCategory.kinds(tags: PatternTag.allCases.filter(tags.contains),
                                      consequence: Consequence(rawValue: row.string("consequence") ?? "") ?? .evaluationLoss)
@@ -506,5 +564,46 @@ final class StatisticsRepository {
                                      solvedAt: row.date("solved_at"),
                                      kinds: Self.kinds(row))
         }
+    }
+}
+
+// MARK: - Game review context
+
+/// The player's results in one opening, for the review's opening row.
+struct OpeningRecord: Equatable {
+    var wins = 0
+    var draws = 0
+    var losses = 0
+
+    var games: Int { wins + draws + losses }
+    /// Points per game as a percentage: a win 1, a draw ½.
+    var score: Double { games == 0 ? 0 : (Double(wins) + Double(draws) / 2) / Double(games) * 100 }
+}
+
+extension StatisticsRepository {
+    /// Every game of the player's in the opening the provider named, whatever the filters: the
+    /// review speaks of the player's history with the opening, not of the current view.
+    func openingRecord(playerID: UUID, openingName: String) throws -> OpeningRecord {
+        guard let row = try database.queryOne("""
+            SELECT COALESCE(SUM(outcome = 'win'), 0) AS wins,
+                   COALESCE(SUM(outcome = 'draw'), 0) AS draws,
+                   COALESCE(SUM(outcome = 'loss'), 0) AS losses
+            FROM player_games WHERE player_id = ? AND opening_name = ?;
+            """, [playerID.sqlValue, openingName.sqlValue]) else { return OpeningRecord() }
+        return OpeningRecord(wins: row.int("wins") ?? 0, draws: row.int("draws") ?? 0, losses: row.int("losses") ?? 0)
+    }
+
+    /// How many of the player's errors showed `tag` in deep-reviewed games that ended in the
+    /// `days` before `date`, the game itself left out.
+    func patternCount(playerID: UUID, tag: PatternTag, before date: Date, days: Int = 30) throws -> Int {
+        try database.queryOne("""
+            SELECT COUNT(*) AS value
+            FROM player_games pg
+            JOIN analyses a ON a.game_key = pg.game_key AND a.policy_id = ? AND a.status = 'complete'
+            JOIN move_labels l ON l.analysis_id = a.id AND l.mover = pg.color
+            WHERE pg.player_id = ? AND l.severity IS NOT NULL AND (' ' || l.tags || ' ') LIKE ?
+              AND pg.end_time >= ? AND pg.end_time < ?;
+            """, [DeepReview.identifier.sqlValue, playerID.sqlValue, "% \(tag.rawValue) %".sqlValue,
+                  date.addingTimeInterval(-Double(days) * 86_400).sqlValue, date.sqlValue])?.int("value") ?? 0
     }
 }

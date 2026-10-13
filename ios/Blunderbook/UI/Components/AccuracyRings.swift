@@ -29,7 +29,13 @@ struct AccuracyRings: View {
     let phase: Phase
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ScaledMetric(relativeTo: .subheadline) private var diameter: CGFloat = 40
+    @ScaledMetric private var diameter: CGFloat
+
+    /// - Parameter diameter: 40 in a Games row; the Mistakes tab draws them larger.
+    init(phase: Phase, diameter: CGFloat = 40) {
+        self.phase = phase
+        _diameter = ScaledMetric(wrappedValue: diameter, relativeTo: .subheadline)
+    }
     @State private var settle: Settle?
 
     /// When a spin ended and where each ring was pointing at that moment.
@@ -40,9 +46,10 @@ struct AccuracyRings: View {
 
     /// One clock for every spinning ring on screen, so rows that spin together stay in step.
     private static let epoch = Date()
-    /// Degrees per second, outside in; the middle ring turns the other way.
-    private static let speeds: [Double] = [330, -250, 410]
-    private static let spinLength = 0.26
+    /// Degrees per second, outside in; the middle ring turns the other way. Shared with
+    /// `RevealPortal`, which picks the arcs up where they are.
+    static let speeds: [Double] = [330, -250, 410]
+    static let spinLength = 0.26
     private static let settleDuration = 0.9
     private static let settleStagger = 0.12
     /// When the check starts to appear, and how long it takes.
@@ -51,7 +58,7 @@ struct AccuracyRings: View {
     private static var settleTotal: Double { checkDelay + checkDuration }
 
     /// Amber stepped down in lightness, outside in, close enough to stay visible at row size.
-    private static let colors = [Palette.brand, Palette.fixed(0xD9A043), Palette.fixed(0xB9893F)]
+    static let colors = [Palette.brand, Palette.fixed(0xD9A043), Palette.fixed(0xB9893F)]
 
     var body: some View {
         TimelineView(.animation(paused: !isMoving)) { context in
@@ -141,8 +148,11 @@ struct AccuracyRings: View {
         return [game, days30 ?? 0, months12 ?? 0][ring]
     }
 
-    private func spinAngle(ring: Int, at date: Date) -> Double {
-        let degrees = Self.speeds[ring] * date.timeIntervalSince(Self.epoch)
+    private func spinAngle(ring: Int, at date: Date) -> Double { Self.spinAngle(ring: ring, at: date) }
+
+    /// Where a spinning ring points at `date`, in degrees from the top.
+    static func spinAngle(ring: Int, at date: Date) -> Double {
+        let degrees = speeds[ring] * date.timeIntervalSince(epoch)
         return (degrees.truncatingRemainder(dividingBy: 360) + 360).truncatingRemainder(dividingBy: 360)
     }
 

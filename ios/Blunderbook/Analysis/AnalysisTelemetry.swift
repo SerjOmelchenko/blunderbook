@@ -51,7 +51,7 @@ final class AnalysisTelemetry: @unchecked Sendable {
         var battery: Double?
         var charging: Bool
         var lowPower: Bool
-        /// The engines bulk work may use, such as "P+4E" or "4E".
+        /// The engines bulk work may use, such as "P+2E" or "2E".
         var engines: String
         var blockers: [String]
         var pausedByUser: Bool

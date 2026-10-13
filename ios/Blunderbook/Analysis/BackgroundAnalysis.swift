@@ -274,6 +274,8 @@ final class BackgroundAnalysisController {
             session.beginGame(gameKey: gameKey)
         case .progress(let gameKey, let completed, let total):
             session.advance(gameKey: gameKey, completed: completed, total: total)
+        case .partial:
+            return
         case .finished(let gameKey, _), .failed(let gameKey, _):
             session.finishGame(gameKey: gameKey)
             session.remaining = max(0, unfinishedCount() - (coordinator?.activeGames.count ?? 0))

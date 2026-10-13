@@ -70,14 +70,18 @@ struct GameRow: View {
     }
 }
 
-/// The end of a game's row: its accuracy, then the three rings. Grey rings queue a review in
-/// place; spinning rings mean it waits or runs; finished rings open the game's mistakes.
+/// The end of a game's row: its accuracy, then the three rings. Grey rings start the game's
+/// analysis in place, one game at a time: while any game is analysed the others' grey rings are
+/// dimmed. Spinning rings mean it waits or runs; finished rings open the game's mistakes. If
+/// nobody is touching the screen when the analysis lands, you fly through the rings into the
+/// game (`RevealPortal`, started by `AppModel.revealIfLanded`).
 struct GameRowRings: View {
     let entry: GameListEntry
 
     @Environment(AppModel.self) private var model
     @Environment(\.openMistakes) private var openMistakes
     @ScaledMetric(relativeTo: .body) private var figureWidth: CGFloat = 28
+    @State private var ringsFrame: CGRect = .zero
 
     var body: some View {
         if entry.analysisStatus == .failed, !isBusy {
@@ -95,20 +99,37 @@ struct GameRowRings: View {
                     .animation(.smooth(duration: 1.1), value: figure)
                     .frame(minWidth: figureWidth, alignment: .trailing)
                     .lineLimit(1)
+                    .opacity(isRevealing ? 0 : 1)
                     .accessibilityHidden(true)
                 Button(action: tap) {
                     AccuracyRings(phase: phase)
+                        // Where the flight starts if this game's analysis lands while it is on screen.
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                            ringsFrame = frame
+                            if model.pendingReveal?.gameKey == entry.game.gameKey {
+                                model.rowRingsFrame = (entry.game.gameKey, frame)
+                            }
+                        }
+                        .onDisappear {
+                            if model.rowRingsFrame?.gameKey == entry.game.gameKey { model.rowRingsFrame = nil }
+                        }
+                        // The flight carries these rings away; the row's own copy steps aside.
+                        .opacity(isRevealing ? 0 : 1)
                         .frame(minWidth: Layout.minimumTarget, minHeight: Layout.minimumTarget)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 // Not disabled while busy: a disabled button dims, and the spin should stay bright.
-                .disabled(phase == .inactive && !model.canAnalyse)
+                // One game at a time: grey rings wait while another game is analysed.
+                .disabled(phase == .inactive && (!model.canAnalyse || model.isAnalysingAGame))
                 .accessibilityLabel(accessibilityLabel)
                 .accessibilityHint(accessibilityHint)
             }
         }
     }
+
+    /// The flight is carrying this game's rings away; the row's own rings and figure step aside.
+    private var isRevealing: Bool { model.reveal?.gameKey == entry.game.gameKey }
 
     private var isBusy: Bool {
         entry.isQueued || entry.analysisStatus == .pending || entry.analysisStatus == .running
@@ -131,7 +152,10 @@ struct GameRowRings: View {
 
     private func tap() {
         switch phase {
-        case .inactive: model.requestReview(gameKey: entry.game.gameKey, deep: true)
+        case .inactive:
+            if model.analyseThenOpen(gameKey: entry.game.gameKey) == nil {
+                model.rowRingsFrame = (entry.game.gameKey, ringsFrame)
+            }
         case .values: openMistakes(gameKey: entry.game.gameKey)
         case .busy: break
         }
@@ -152,7 +176,10 @@ struct GameRowRings: View {
 
     private var accessibilityHint: String {
         switch phase {
-        case .inactive: return "Starts an in-depth review here"
+        case .inactive:
+            return model.isAnalysingAGame
+                ? "Another game is being analysed. Games are analysed one at a time."
+                : "Starts an in-depth review here, and opens the game when it is done"
         case .busy: return ""
         case .values: return "Opens this game's mistakes"
         }
@@ -169,8 +196,8 @@ struct GameList: View {
     var body: some View {
         LazyVStack(spacing: 0) {
             ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                // Two targets side by side, never one inside the other: the row opens the game,
-                // the rings act on their own.
+                // Two targets side by side, never one inside the other: the row opens the game
+                // as it is, without starting an analysis; the rings act on their own.
                 HStack(spacing: 4) {
                     NavigationLink(value: Route.gameReview(gameKey: entry.game.gameKey, ply: nil)) {
                         GameRow(entry: entry)
@@ -206,7 +233,6 @@ struct GamesScreen: View {
     @State private var entries: [GameListEntry] = []
     @State private var totalCount = 0
     @State private var hasMore = false
-    @State private var showsBulkPreparation = false
 
     private let pageSize = 50
 
@@ -244,7 +270,7 @@ struct GamesScreen: View {
                 }
 
                 if segment == .eligible, model.canAnalyse {
-                    bulkSection
+                    queueLink
                         .padding(.horizontal, Layout.gutter)
                         .padding(.top, 28)
                 }
@@ -254,7 +280,6 @@ struct GamesScreen: View {
         .refreshable { await model.refreshSelectedPlayer() }
         .task(id: listKey) { reload() }
         .onChange(of: refreshKey) { _, _ in reload(keepingLoaded: true) }
-        .sheet(isPresented: $showsBulkPreparation) { BulkPreparationSheet().hostsPaywall() }
     }
 
     /// Every game the player has, whatever date range Analytics shows: only the time class,
@@ -327,21 +352,13 @@ struct GamesScreen: View {
     }
 
     @ViewBuilder
-    private var bulkSection: some View {
+    private var queueLink: some View {
         let pending = model.coordinator.counts.pending + model.coordinator.counts.running
         if pending > 0 {
             NavigationLink(value: Route.queue) {
                 Text("\(pending) game\(pending == 1 ? "" : "s") queued · open queue")
             }
             .buttonStyle(SecondaryButtonStyle())
-        } else {
-            Button {
-                showsBulkPreparation = true
-            } label: {
-                PremiumLabel("Analyse previous \(AppModel.bulkBatchSize) games",
-                             locked: !model.canAnalyseInBulk)
-            }
-            .buttonStyle(PrimaryButtonStyle())
         }
     }
 

@@ -76,6 +76,30 @@ enum DevelopmentSeed {
     /// its rings in Games spin, then (left untouched) fly you through them into the game.
     nonisolated static var queuedGame: String? { argument("-queue-game") }
 
+    /// `-reset-tips`: every first-run tip shows again, to check them without reinstalling.
+    nonisolated static var resetsTips: Bool { ProcessInfo.processInfo.arguments.contains("-reset-tips") }
+
+    /// `-tip games_first_analysed:2`: only that tip shows, opened at that step, to inspect it
+    /// without tapping. With `-queue-game`, `-tip analysis_note` opens the note as the game queues.
+    nonisolated static var tipPreview: (moment: String, step: Int)? {
+        guard let value = argument("-tip") else { return nil }
+        let parts = value.split(separator: ":")
+        return (String(parts[0]), parts.count > 1 ? Int(parts[1]) ?? 0 : 0)
+    }
+
+    /// `-reset-trial-offer`: the free-trial offer after an analysed game can show again.
+    nonisolated static var resetsTrialOffer: Bool { ProcessInfo.processInfo.arguments.contains("-reset-trial-offer") }
+
+    /// `-trial-eligible`: the app takes the account as able to have the trial instead of asking
+    /// Apple, which in the simulator wants a sandbox sign-in, and the offer after a game shows
+    /// even if the App Store product has no trial yet (its terms then read as the plain plan).
+    /// Elsewhere the trial still has to be on the product; purchases still go to the App Store.
+    nonisolated static var assumesTrialEligible: Bool { ProcessInfo.processInfo.arguments.contains("-trial-eligible") }
+
+    /// `-leave-game`: with `-open-game`, goes back to the tab 3 s after launch, as tapping back
+    /// would, to watch what follows a game without touching the screen.
+    nonisolated static var leavesGame: Bool { ProcessInfo.processInfo.arguments.contains("-leave-game") }
+
     /// `-unlock-mistakes`: the Mistakes tab opens without Premium, to check it on real data.
     nonisolated static var unlocksMistakes: Bool { ProcessInfo.processInfo.arguments.contains("-unlock-mistakes") }
 

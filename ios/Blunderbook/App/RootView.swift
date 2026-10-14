@@ -20,6 +20,19 @@ enum Route: Hashable {
     case queue
     case howAnalysisWorks
     case about
+
+    /// The name usage events give this screen. Never the game or mistake it shows.
+    var screenName: String {
+        switch self {
+        case .gameReview: return "Game review"
+        case .mistakeDrill: return "Mistake drill"
+        case .training: return "Training"
+        case .explore: return "Explore"
+        case .queue: return "Queue"
+        case .howAnalysisWorks: return "How analysis works"
+        case .about: return "About"
+        }
+    }
 }
 
 struct RootView: View {
@@ -30,6 +43,9 @@ struct RootView: View {
     @State private var showsFilters = false
     @State private var showsPaywall = false
     @State private var showsMistakesPreview = false
+    /// The free-trial offer, once leaving a game has made it due, and once it is up.
+    @State private var dueTrialOffer: TrialOffer?
+    @State private var trialOffer: TrialOffer?
     @State private var paths: [RootTab: [Route]] = [:]
     /// The game's scale behind the hole in the list while you fly through a row's rings
     /// (`RevealPortal`); 1 the rest of the time.
@@ -44,11 +60,13 @@ struct RootView: View {
         Group {
             if model.trackedPlayers.isEmpty || model.isOnboarding {
                 WelcomeScreen()
+                    .tracksScreen("Welcome")
             } else {
                 TabView(selection: tabSelection) {
                     ForEach(RootTab.allCases) { tab in
                         NavigationStack(path: binding(for: tab)) {
                             content(for: tab)
+                                .tracksScreen(tab.title)
                                 .navigationTitle(tab.title)
                                 // Analytics leads with its own hero; the lists lead with a large title.
                                 .navigationBarTitleDisplayMode(tab == .analytics ? .inline : .large)
@@ -68,6 +86,7 @@ struct RootView: View {
                 .onChange(of: paths[.games]?.isEmpty ?? true, initial: true) { _, isEmpty in
                     model.isGamesListShowing = isEmpty
                 }
+                .onChange(of: paths) { old, new in checkForTrialOffer(old: old, new: new) }
                 .onChange(of: model.pendingRoute) { _, route in
                     guard let route else { return }
                     model.pendingRoute = nil
@@ -80,6 +99,13 @@ struct RootView: View {
             }
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rootFrame = $0 }
+        .overlay { FirstRunTipsOverlay() }
+        .task(id: tipsWatchKey) { await watchForTips() }
+        .task(id: dueTrialOffer?.id) { await presentTrialOfferWhenClear() }
+        // A Games tip only makes sense over the Games list: if the list goes, so does the tip.
+        .onChange(of: isGamesListInView) { _, inView in
+            if !inView { model.tips.withdrawGamesMoment() }
+        }
         .overlay {
             if let reveal = model.reveal {
                 RevealPortal(reveal: reveal) {
@@ -94,10 +120,13 @@ struct RootView: View {
         }
         .background(TouchActivityMonitor { model.lastTouchAt = Date() })
         .task { applyDevelopmentRoute() }
-        .sheet(isPresented: $showsPlayers) { PlayersSheet().hostsPaywall() }
-        .sheet(isPresented: $showsSettings) { SettingsSheet().hostsPaywall() }
-        .sheet(isPresented: $showsFilters) { FiltersSheet(showsDates: model.selectedTab != .games) }
-        .sheet(isPresented: $showsMistakesPreview) { MistakesPreviewSheet().hostsPaywall() }
+        .sheet(isPresented: $showsPlayers) { PlayersSheet().hostsPaywall().tracksScreen("Players") }
+        .sheet(isPresented: $showsSettings) { SettingsSheet().hostsPaywall().tracksScreen("Settings") }
+        .sheet(isPresented: $showsFilters) {
+            FiltersSheet(showsDates: model.selectedTab != .games).tracksScreen("Filters")
+        }
+        .sheet(isPresented: $showsMistakesPreview) { MistakesPreviewSheet().hostsPaywall().tracksScreen("Mistakes preview") }
+        .sheet(item: $trialOffer) { offer in TrialOfferSheet(offer: offer).tracksScreen("Trial offer") }
         .sheet(item: $debugScreen) { screen in debugView(screen) }
         .hostsPaywall(isPresented: $showsPaywall)
         .environment(\.showFilters, ShowFiltersAction { showsFilters = true })
@@ -163,6 +192,89 @@ struct RootView: View {
         }
     }
 
+    // MARK: First-run tips
+
+    private var isPresentingSheet: Bool {
+        showsPlayers || showsSettings || showsFilters || showsMistakesPreview || showsPaywall || trialOffer != nil
+            || debugScreen != nil
+    }
+
+    /// Games is the tab on screen, showing its list with nothing over it.
+    private var isGamesListInView: Bool {
+        model.selectedTab == .games && (paths[.games]?.isEmpty ?? true) && !isPresentingSheet && model.reveal == nil
+    }
+
+    private var tipsWatchKey: String {
+        "\(isGamesListInView)|\(model.tips.showing?.rawValue ?? "")"
+    }
+
+    /// Starts a Games tip once its row sits in full view and nothing else is going on: no
+    /// sheet, no flight into a game, and no finger on the screen for a moment.
+    private func watchForTips() async {
+        guard isGamesListInView, model.tips.showing == nil, model.tips.isWatchingGames else { return }
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(0.5))
+            guard isGamesListInView,
+                  Date().timeIntervalSince(model.lastTouchAt) >= 0.8,
+                  UIApplication.shared.applicationState == .active,
+                  !AppModel.isPresentingSheet,
+                  let area = visibleListArea else { continue }
+            if model.tips.startIfReady(in: area, greyRingsTappable: model.canAnalyse && !model.isAnalysingAGame) { return }
+        }
+    }
+
+    // MARK: Free-trial offer
+
+    /// Coming back from a game to a tab's first screen may make the free-trial offer due
+    /// (`AppModel.trialOffer(afterLeaving:)` decides).
+    private func checkForTrialOffer(old: [RootTab: [Route]], new: [RootTab: [Route]]) {
+        guard dueTrialOffer == nil, trialOffer == nil else { return }
+        for (tab, path) in old where !path.isEmpty && (new[tab] ?? []).isEmpty {
+            let gameKey = path.reversed().lazy.compactMap { route -> String? in
+                if case .gameReview(let key, _) = route { return key }
+                return nil
+            }.first
+            guard let gameKey else { continue }
+            Task { dueTrialOffer = await model.trialOffer(afterLeaving: gameKey) }
+            return
+        }
+    }
+
+    /// Brings the due offer up once nothing else is going on: no game, sheet, flight or tip on
+    /// screen, and no finger on it for a moment. On Games, the tip on the analysed row goes
+    /// first, so it gets a few seconds to start. Apple is asked about the trial last; without
+    /// it the offer is dropped until the next game.
+    private func presentTrialOfferWhenClear() async {
+        var clearSince: Date?
+        while !Task.isCancelled, let offer = dueTrialOffer {
+            try? await Task.sleep(for: .seconds(0.5))
+            let isClear = (paths[model.selectedTab]?.isEmpty ?? true) && !isPresentingSheet
+                && !AppModel.isPresentingSheet && model.reveal == nil && model.tips.showing == nil
+                && Date().timeIntervalSince(model.lastTouchAt) >= 0.8
+                && UIApplication.shared.applicationState == .active
+            guard isClear else { clearSince = nil; continue }
+            let since = clearSince ?? Date()
+            clearSince = since
+            if model.selectedTab == .games, !model.tips.hasSeen(.gamesFirstAnalysed),
+               Date().timeIntervalSince(since) < 3 { continue }
+            guard await model.trialIsOnOffer() else { dueTrialOffer = nil; return }
+            model.markTrialOfferShown()
+            trialOffer = offer
+            dueTrialOffer = nil
+            return
+        }
+    }
+
+    /// The part of the screen between the navigation bar and the tab bar (and the analysis bar
+    /// above it), in global coordinates.
+    private var visibleListArea: CGRect? {
+        guard let window = AppModel.keyWindow else { return nil }
+        let insets = window.safeAreaInsets
+        let top = insets.top + 52
+        let bottom = insets.bottom + 60 + (isAnalysisBarShowing ? 60 : 0)
+        return CGRect(x: 0, y: top, width: window.bounds.width, height: window.bounds.height - top - bottom)
+    }
+
     /// The bottom bar shows while a game waits or is analysed, except over a game.
     private var isAnalysisBarShowing: Bool { hasQueuedWork && !isReviewingGame }
 
@@ -197,8 +309,15 @@ struct RootView: View {
         if let timeClass = DevelopmentSeed.startupTimeClass { filters.timeClass = timeClass }
         if let range = DevelopmentSeed.startupDateRange { filters.dateRange = range }
         if filters != model.filters { model.updateFilters(filters) }
+        if DevelopmentSeed.resetsTrialOffer { model.preferences.set(PreferenceKey.trialOfferShown, nil) }
         if let tab = DevelopmentSeed.startupTab { model.selectedTab = tab }
         if let route = DevelopmentSeed.startupRoute { paths[model.selectedTab] = [route] }
+        if DevelopmentSeed.leavesGame {
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                paths[model.selectedTab] = []
+            }
+        }
         if DevelopmentSeed.opensExplore, case .gameReview(let key, let ply)? = DevelopmentSeed.startupRoute {
             let review = GameReviewModel()
             review.load(app: model, gameKey: key, initialPly: ply)
@@ -208,6 +327,9 @@ struct RootView: View {
             Task {
                 try? await Task.sleep(for: .seconds(3))
                 model.analyseThenOpen(gameKey: key)
+                if DevelopmentSeed.tipPreview?.moment == FirstRunTips.Moment.analysisNote.rawValue {
+                    model.tips.showAnalysisNoteIfFirst()
+                }
             }
         }
         if DevelopmentSeed.opensFirstMistake, let player = model.selectedPlayer,
@@ -270,8 +392,12 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder
     private func destination(_ route: Route) -> some View {
+        routeView(route).tracksScreen(route.screenName)
+    }
+
+    @ViewBuilder
+    private func routeView(_ route: Route) -> some View {
         switch route {
         case .gameReview(let key, let ply): GameReviewScreen(gameKey: key, initialPly: ply)
         case .mistakeDrill(let occurrence): MistakeDrillScreen(occurrence: occurrence)
@@ -361,15 +487,20 @@ struct QueueAccessoryModifier: ViewModifier {
 /// opens nothing. If the analysed game's row is off screen when the analysis lands, you fly
 /// through these rings into the game instead (`AppModel.revealIfLanded`).
 struct QueueAccessory: View {
+    /// False for the copy at the foot of the first-analysis note, which sits over the real bar.
+    var reportsFrames = true
+
     @Environment(AppModel.self) private var model
 
     private var coordinator: AnalysisCoordinator { model.coordinator }
     private var isRevealing: Bool { model.reveal?.fromBar == true }
-    /// Full while the flight leaves from here: the analysis has landed.
-    private var fraction: Double { isRevealing ? 1 : coordinator.currentFraction }
+    /// The analysis is done: the flight leaves from here, or the note's copy outlived the bar.
+    private var hasLanded: Bool { isRevealing || (!reportsFrames && !model.isAnalysingAGame) }
+    /// Full once the analysis has landed.
+    private var fraction: Double { hasLanded ? 1 : coordinator.currentFraction }
 
     private var title: String {
-        if isRevealing { return "Analysed" }
+        if hasLanded { return "Analysed" }
         if coordinator.isPausedByUser { return "Paused" }
         if let blocker = coordinator.primaryBlocker { return blocker.title }
         if coordinator.currentGameKey == nil { return "Waiting" }
@@ -383,9 +514,11 @@ struct QueueAccessory: View {
                 AccuracyRings(phase: .busy)
                     .scaleEffect(Self.ringScale)
                     .frame(width: 40 * Self.ringScale, height: 40 * Self.ringScale)
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { model.barRingsFrame = $0 }
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                        if reportsFrames { model.barRingsFrame = $0 }
+                    }
                     // The flight carries these rings away; the bar's own copy steps aside.
-                    .opacity(isRevealing ? 0 : 1)
+                    .opacity(hasLanded ? 0 : 1)
                 (Text(title).fontWeight(.semibold)
                     + Text(left.map { "  \($0)" } ?? "").foregroundStyle(Palette.inkSecondary))
                     .monospacedDigit()
@@ -395,6 +528,9 @@ struct QueueAccessory: View {
             .font(.subheadline)
             .padding(.horizontal, 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                if reportsFrames { model.barFrame = $0 }
+            }
             .background(alignment: .leading) {
                 GeometryReader { proxy in
                     Palette.brand.opacity(0.32)
@@ -413,7 +549,7 @@ struct QueueAccessory: View {
     /// About how long the game has left, from how fast it has gone so far. Nothing until there is
     /// enough to go on, or while it is paused or held back.
     private func timeLeft(at date: Date) -> String? {
-        guard !isRevealing, !coordinator.isPausedByUser, coordinator.primaryBlocker == nil,
+        guard !hasLanded, !coordinator.isPausedByUser, coordinator.primaryBlocker == nil,
               let key = coordinator.currentGameKey,
               let started = coordinator.activeGames[key]?.startedAt else { return nil }
         let done = coordinator.currentFraction
@@ -436,7 +572,7 @@ private struct PaywallHost: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .sheet(isPresented: $isPresented) { PaywallScreen() }
+            .sheet(isPresented: $isPresented) { PaywallScreen().tracksScreen("Paywall") }
             .environment(\.showPaywall, ShowPaywallAction { isPresented = true })
     }
 }
@@ -450,6 +586,11 @@ private struct OwnPaywallHost: ViewModifier {
 }
 
 extension View {
+    /// Reports a usage event each time this screen comes into view.
+    func tracksScreen(_ name: String) -> some View {
+        onAppear { UsageAnalytics.shared.track(.screen(name)) }
+    }
+
     /// Lets anything inside call `showPaywall()`; `isPresented` is for a caller that also opens it.
     func hostsPaywall(isPresented: Binding<Bool>) -> some View {
         modifier(PaywallHost(isPresented: isPresented))

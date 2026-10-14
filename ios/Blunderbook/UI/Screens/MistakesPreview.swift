@@ -23,6 +23,8 @@ struct MistakesPreviewSheet: View {
     @State private var selectedKind: MistakeCategory?
     @State private var focus: MistakeFocus?
     @State private var solved: Set<String> = SampleMistakes.initiallySolved
+    @State private var isPurchasing = false
+    @State private var purchaseOutcome: PurchaseOutcome?
 
     private var book: MistakeBook { MistakeBook(occurrences: SampleMistakes.occurrences(solved: solved)) }
 
@@ -56,6 +58,7 @@ struct MistakesPreviewSheet: View {
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Close") { dismiss() } } }
             .navigationDestination(for: Route.self, destination: destination)
         }
+        .task { await model.entitlement.refreshTrialEligibility() }
         // Subscribing from here goes straight to the real tab.
         .onChange(of: model.isMistakesLocked) { _, isLocked in
             guard !isLocked else { return }
@@ -114,32 +117,54 @@ struct MistakesPreviewSheet: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// Pinned under the list, never over it.
+    /// Pinned under the list, never over it. While the account can still have the free trial,
+    /// starting it goes straight to Apple's sheet and Subscribe opens the plan to read first;
+    /// Apple gives the trial to either, so they never buy different things. With the trial
+    /// used, Subscribe buys the plan directly.
     private var unlockBar: some View {
-        VStack(spacing: 6) {
-            Button(unlockTitle) { showPaywall() }
+        VStack(spacing: 8) {
+            // Backing out of Apple's sheet needs no note.
+            if let purchaseOutcome, purchaseOutcome != .purchased, purchaseOutcome != .cancelled {
+                PurchaseOutcomeBanner(outcome: purchaseOutcome)
+            }
+            if let length = model.entitlement.freeTrialLength {
+                Button { Task { await purchase() } } label: { purchaseLabel("Start \(length) free trial") }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(isPurchasing)
+                Button("Subscribe") { showPaywall() }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .disabled(isPurchasing)
+            } else if model.entitlement.product != nil {
+                Button { Task { await purchase() } } label: {
+                    purchaseLabel("Subscribe \u{00B7} \(model.entitlement.priceDescription)")
+                }
                 .buttonStyle(PrimaryButtonStyle())
-            Text(unlockCaption)
-                .font(.caption)
-                .foregroundStyle(Palette.inkTertiary)
-                .multilineTextAlignment(.center)
+                .disabled(isPurchasing)
+            } else {
+                // The App Store has not answered: the plan screen says why and can retry.
+                Button("Unlock with Premium") { showPaywall() }
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+            PlanTermsNote()
         }
         .padding(.horizontal, Layout.gutter)
         .padding(.top, 10)
         .padding(.bottom, 6)
         .background(Palette.background)
+        .animation(.smooth(duration: 0.2), value: purchaseOutcome)
     }
 
-    private var unlockTitle: String {
-        if let length = model.entitlement.freeTrialLength { return "Start \(length) free trial" }
-        return "Unlock with Premium"
+    @ViewBuilder
+    private func purchaseLabel(_ title: String) -> some View {
+        if isPurchasing { ProgressView().tint(Palette.onBrand) } else { Text(title) }
     }
 
-    private var unlockCaption: String {
-        guard model.entitlement.product != nil else { return "Includes deeper reviews and more players." }
-        let price = model.entitlement.priceDescription
-        if model.entitlement.freeTrial != nil { return "Then \(price). Includes deeper reviews and more players." }
-        return "\(price). Includes deeper reviews and more players."
+    /// Success needs nothing here: the tab unlocks and the sheet hands over to it.
+    private func purchase() async {
+        isPurchasing = true
+        purchaseOutcome = nil
+        purchaseOutcome = await model.purchasePremium()
+        isPurchasing = false
     }
 
     private func tick(_ solvedOne: MistakeOccurrence) {

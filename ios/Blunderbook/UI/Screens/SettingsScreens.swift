@@ -734,6 +734,8 @@ struct HowAnalysisWorksScreen: View {
 // MARK: - W25 About and licences
 
 struct AboutScreen: View {
+    @Environment(AppModel.self) private var model
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -825,10 +827,16 @@ struct AboutScreen: View {
                 Panel {
                     VStack(alignment: .leading, spacing: 8) {
                         SectionHeading(title: "Privacy")
-                        Text("Games come directly from the public APIs of Chess.com and Lichess. No account is created and no password is ever requested. Purchases go through Apple. There is no third-party analytics or tracking in this app, and no data is uploaded anywhere. Exported backups contain player names and game data, so treat them as personal files.")
+                        Text("Games come directly from the public APIs of Chess.com and Lichess. No account is created and no password is ever requested. Purchases go through Apple. The app sends anonymous usage events (which screens are opened, when analysis runs) to PostHog so we can see how it's used. No usernames, games or personal data are sent, and you can turn this off below. Exported backups contain player names and game data, so treat them as personal files.")
                             .font(.footnote)
                             .foregroundStyle(Palette.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        Toggle("Share anonymous usage data", isOn: Binding(get: { model.sharesUsageData },
+                                                                           set: { model.setSharesUsageData($0) }))
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Palette.ink)
+                            .tint(Palette.brand)
+                            .frame(minHeight: Layout.minimumTarget)
                     }
                 }
 
@@ -848,9 +856,9 @@ struct AboutScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Link("Source code", destination: URL(string: "https://example.com/source")!)
-                    Link("Privacy policy", destination: URL(string: "https://example.com/privacy")!)
-                    Link("Terms", destination: URL(string: "https://example.com/terms")!)
+                    Link("Source code", destination: SiteLink.source)
+                    Link("Privacy policy", destination: SiteLink.privacy)
+                    Link("Terms", destination: SiteLink.terms)
                     Link("Chess.com Published-Data API", destination: URL(string: "https://www.chess.com/news/view/published-data-api")!)
                     Link("Lichess API", destination: URL(string: "https://lichess.org/api")!)
                 }

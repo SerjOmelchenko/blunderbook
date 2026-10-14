@@ -40,6 +40,7 @@ struct GameRow: View {
         }
         .frame(minHeight: 64)
         .contentShape(Rectangle())
+        .tipTarget(.row, of: entry)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
     }
@@ -100,6 +101,7 @@ struct GameRowRings: View {
                     .frame(minWidth: figureWidth, alignment: .trailing)
                     .lineLimit(1)
                     .opacity(isRevealing ? 0 : 1)
+                    .tipTarget(.figure, of: entry)
                     .accessibilityHidden(true)
                 Button(action: tap) {
                     AccuracyRings(phase: phase)
@@ -119,6 +121,7 @@ struct GameRowRings: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .tipTarget(.rings, of: entry)
                 // Not disabled while busy: a disabled button dims, and the spin should stay bright.
                 // One game at a time: grey rings wait while another game is analysed.
                 .disabled(phase == .inactive && (!model.canAnalyse || model.isAnalysingAGame))
@@ -155,6 +158,7 @@ struct GameRowRings: View {
         case .inactive:
             if model.analyseThenOpen(gameKey: entry.game.gameKey) == nil {
                 model.rowRingsFrame = (entry.game.gameKey, ringsFrame)
+                model.tips.showAnalysisNoteIfFirst()
             }
         case .values: openMistakes(gameKey: entry.game.gameKey)
         case .busy: break

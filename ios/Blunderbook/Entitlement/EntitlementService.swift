@@ -160,6 +160,10 @@ final class EntitlementService {
     /// it — never launch.
     func refreshTrialEligibility() async {
         if product == nil { await loadProduct() }
+        #if DEBUG
+        // The simulator wants a sandbox sign-in for this question.
+        if DevelopmentSeed.assumesTrialEligible { isEligibleForTrial = true; return }
+        #endif
         isEligibleForTrial = await product?.subscription?.isEligibleForIntroOffer ?? false
     }
 

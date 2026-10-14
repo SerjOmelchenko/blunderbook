@@ -34,6 +34,8 @@ final class AppModel {
     let entitlement: EntitlementService
     let conditions: DeviceConditionsMonitor
     let coordinator: AnalysisCoordinator
+    /// The one-time tips on Games and the note on the first analysis.
+    let tips: FirstRunTips
     private let engine: ChessEngine?
 
     // State
@@ -119,6 +121,7 @@ final class AppModel {
         queue = QueueRepository(database: database)
         telemetry = AnalysisTelemetry(directory: Self.databaseDirectory().appendingPathComponent("Telemetry", isDirectory: true))
         preferences = PreferencesRepository(database: database)
+        tips = FirstRunTips(preferences: preferences)
         archives = ArchiveRepository(database: database)
         sync = ArchiveSyncService(client: ChessComClient(), lichess: LichessClient(), players: players, games: games,
                                   archives: archives)
@@ -142,6 +145,9 @@ final class AppModel {
 
         restorePreferences()
         reloadPlayers()
+        sharesUsageData = preferences.string(PreferenceKey.usageAnalyticsOff) != "1"
+        UsageAnalytics.shared.configure(distinctID: sharesUsageData ? usageAnalyticsID() : nil,
+                                        directory: Self.databaseDirectory())
     }
 
     /// What the performance log needs to tell one phone and build from another.
@@ -232,6 +238,54 @@ final class AppModel {
         preferences.setValue(PreferenceKey.filters, filters)
     }
 
+    // MARK: - Usage sharing
+
+    /// Anonymous usage events go to PostHog while this is on, which it is unless turned off in
+    /// About › Privacy.
+    private(set) var sharesUsageData = true
+
+    func setSharesUsageData(_ isOn: Bool) {
+        sharesUsageData = isOn
+        preferences.set(PreferenceKey.usageAnalyticsOff, isOn ? nil : "1")
+        // Off forgets the ID, so sharing turned on again never continues the old history.
+        if !isOn {
+            preferences.set(PreferenceKey.usageAnalyticsID, nil)
+            preferences.set(PreferenceKey.usageAnalyticsIDCreated, nil)
+        }
+        UsageAnalytics.shared.update(distinctID: isOn ? usageAnalyticsID() : nil)
+    }
+
+    /// How long one ID lasts. Privacy regulators allow an audience-measurement ID up to 13
+    /// months without consent (CNIL); a year stays inside that.
+    static let usageAnalyticsIDLifetime: TimeInterval = 365 * 24 * 60 * 60
+
+    /// Replaces the ID once it is a year old. Checked at launch and each time the app comes to the
+    /// front, so a phone that keeps the app running for weeks still gets its new ID on time.
+    func renewUsageAnalyticsIDIfExpired() {
+        guard sharesUsageData else { return }
+        let current = preferences.string(PreferenceKey.usageAnalyticsID)
+        let id = usageAnalyticsID()
+        if id != current { UsageAnalytics.shared.update(distinctID: id) }
+    }
+
+    /// The random ID usage events are sent under, made the first time it is needed and again
+    /// once it is a year old.
+    private func usageAnalyticsID(now: Date = Date()) -> String {
+        if let existing = preferences.string(PreferenceKey.usageAnalyticsID) {
+            if let text = preferences.string(PreferenceKey.usageAnalyticsIDCreated), let created = Double(text) {
+                if now.timeIntervalSince1970 - created < Self.usageAnalyticsIDLifetime { return existing }
+            } else {
+                // An ID from before IDs expired starts its year now.
+                preferences.set(PreferenceKey.usageAnalyticsIDCreated, String(now.timeIntervalSince1970))
+                return existing
+            }
+        }
+        let id = UUID().uuidString.lowercased()
+        preferences.set(PreferenceKey.usageAnalyticsID, id)
+        preferences.set(PreferenceKey.usageAnalyticsIDCreated, String(now.timeIntervalSince1970))
+        return id
+    }
+
     func updateFilters(_ newValue: GameFilters) {
         filters = newValue
         persistSelection()
@@ -303,6 +357,7 @@ final class AppModel {
         player.country = profile.country
         player.title = profile.title
         try players.save(player)
+        UsageAnalytics.shared.track(.playerAdded(player.provider))
         reloadPlayers()
         selectedPlayerID = player.id
         persistSelection()
@@ -402,6 +457,7 @@ final class AppModel {
             result.hasVerifiedWindow = outcome.boundedScopeComplete
         }
         try? players.save(result)
+        if let error = outcome.error { UsageAnalytics.shared.track(.refreshFailed(error)) }
         refreshError = outcome.error
         refreshProgress = nil
         reloadPlayers()
@@ -429,6 +485,13 @@ final class AppModel {
     /// plan, deep or not. Refused while another game is analysed: one game at a time.
     @discardableResult
     func requestReview(gameKey: String, deep: Bool = false) -> ReviewRefusal? {
+        let refusal = queueReview(gameKey: gameKey, deep: deep)
+        UsageAnalytics.shared.track(refusal.map { .analysisRefused($0) }
+                                    ?? .analysisRequested(depth: coordinator.effectiveReviewDepth))
+        return refusal
+    }
+
+    private func queueReview(gameKey: String, deep: Bool) -> ReviewRefusal? {
         guard let player = selectedPlayer else { return .noPlayer }
         if let engineError { return .engineUnavailable(engineError) }
         // Read from the queue, not `coordinator.counts`, which catches up a moment later.
@@ -484,6 +547,9 @@ final class AppModel {
     @ObservationIgnored var rowRingsFrame: (gameKey: String, frame: CGRect)?
     /// Where the bottom bar's rings are on screen, kept by the bar.
     @ObservationIgnored var barRingsFrame: CGRect?
+    /// Where the bottom bar itself is on screen, kept by the bar: the first-analysis note opens
+    /// out of it.
+    @ObservationIgnored var barFrame: CGRect?
     var reveal: Reveal?
 
     /// How long the screen must have gone untouched for the game to open on its own: a person
@@ -512,6 +578,8 @@ final class AppModel {
               let entry = (try? games.entry(playerID: player.id, gameKey: pending.gameKey)) ?? nil,
               entry.hasDeepReview, let accuracy = entry.accuracy,
               Date().timeIntervalSince(lastTouchAt) >= Self.revealIdle,
+              // A tip on screen counts as the person reading: the game stays where it is.
+              tips.showing == nil,
               UIApplication.shared.applicationState == .active,
               !UIAccessibility.isVoiceOverRunning,
               !Self.isPresentingSheet else { return }
@@ -528,14 +596,26 @@ final class AppModel {
         }
     }
 
-    private static var keyWindow: UIWindow? {
+    static var keyWindow: UIWindow? {
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
             .first(where: \.isKeyWindow)
     }
 
-    private static var isPresentingSheet: Bool { keyWindow?.rootViewController?.presentedViewController != nil }
+    static var isPresentingSheet: Bool { keyWindow?.rootViewController?.presentedViewController != nil }
+
+    // MARK: - Premium
+
+    /// Buys the monthly plan (with the free trial when the account can still have it), then
+    /// tells the queue and every screen. Each place that sells Premium goes through here.
+    func purchasePremium() async -> PurchaseOutcome {
+        let outcome = await entitlement.purchase()
+        UsageAnalytics.shared.track(.purchase(outcome))
+        coordinator.updateEntitlement(isPremium: entitlement.state.isPremium)
+        touch()
+        return outcome
+    }
 
     // MARK: - Change notification
 

@@ -109,7 +109,7 @@ actor ProviderTransport {
         }
         self.defaultRateLimitPause = defaultRateLimitPause
         // A descriptive User-Agent is what both sites ask for; Lichess refuses generic ones.
-        userAgent = "Blunderbook/\(appVersion) (iOS local analysis app; contact: support@example.com)"
+        userAgent = "Blunderbook/\(appVersion) (iOS local analysis app; contact: somelchenko.work@gmail.com)"
     }
 
     /// Retries network and 5xx failures with jittered 2, 4, 8, 16, 32-second backoff, then stops

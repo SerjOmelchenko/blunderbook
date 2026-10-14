@@ -62,4 +62,11 @@ cburnett set (GPLv2 or later) and opening names come from Lichess's chess-openin
 domain); [`ios/NOTICE.md`](ios/NOTICE.md) has the details. Each App Store release is tagged in this
 repository, so the corresponding source of any build can be found.
 
+## Trademarks
+
+"Blunderbook" and the Blunderbook icon are trademarks of Serhii Omelchenko. They are not licensed
+under the GPL: as GPLv3 section 7(e) allows, no rights to them are granted. You are free to fork,
+change and redistribute this code under the GPL, but a version you publish must use a different
+name and a different icon, and must not suggest it is the official Blunderbook.
+
 Blunderbook is an independent project, not affiliated with Chess.com or Lichess.

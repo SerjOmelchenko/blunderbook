@@ -44,11 +44,15 @@ struct BlunderbookApp: App {
             let model = appDelegate.model
             switch phase {
             case .active:
+                model.renewUsageAnalyticsIDIfExpired()
+                UsageAnalytics.shared.track(.appOpened)
                 BackgroundAnalysisController.shared.sceneDidBecomeActive()
                 model.conditions.update()
                 // Refresh on foreground; duplicate refreshes coalesce inside the model (§4).
                 Task { await model.refreshSelectedPlayer() }
             case .background:
+                UsageAnalytics.shared.track(.appBackgrounded)
+                UsageAnalytics.shared.flushForBackground()
                 model.persistSelection()
                 BackgroundAnalysisController.shared.sceneDidEnterBackground()
             default:

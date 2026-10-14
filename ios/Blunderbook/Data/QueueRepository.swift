@@ -324,4 +324,14 @@ enum PreferenceKey {
     static let boardFlipped = "board_flipped"
     static let entitlementValidThrough = "entitlement_valid_through"
     static let lastSeenVersion = "last_seen_version"
+    /// The random ID anonymous usage events are sent under; absent while sharing is off.
+    static let usageAnalyticsID = "usage_analytics_id"
+    /// When that ID was made, as seconds since 1970; a new one replaces it after a year.
+    static let usageAnalyticsIDCreated = "usage_analytics_id_created"
+    /// "1" once the person turns usage sharing off; absent means on.
+    static let usageAnalyticsOff = "usage_analytics_off"
+    /// "1" once the free-trial offer after an analysed game has been shown (`TrialOffer`).
+    static let trialOfferShown = "trial_offer_shown"
+    /// "1" once that first-run tip has been shown (`FirstRunTips.Moment`).
+    static func tipSeen(_ moment: String) -> String { "tip_seen_\(moment)" }
 }

@@ -10,6 +10,13 @@
 import SwiftUI
 import StoreKit
 
+/// The app's pages on the web.
+enum SiteLink {
+    static let terms = URL(string: "https://serhiiomelchenko.com/blunderbook-app/terms/")!
+    static let privacy = URL(string: "https://serhiiomelchenko.com/blunderbook-app/privacy/")!
+    static let source = URL(string: "https://serhiiomelchenko.com/blunderbook-app/source/")!
+}
+
 // MARK: - W16 Premium plan
 
 struct PaywallScreen: View {
@@ -55,7 +62,7 @@ struct PaywallScreen: View {
                         }
                     }
 
-                    if let outcome { outcomeBanner(outcome) }
+                    if let outcome { PurchaseOutcomeBanner(outcome: outcome) }
 
                     VStack(spacing: 10) {
                         Button {
@@ -93,8 +100,8 @@ struct PaywallScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                     HStack(spacing: 14) {
-                        Link("Terms", destination: URL(string: "https://example.com/terms")!)
-                        Link("Privacy", destination: URL(string: "https://example.com/privacy")!)
+                        Link("Terms", destination: SiteLink.terms)
+                        Link("Privacy", destination: SiteLink.privacy)
                     }
                     .font(.footnote.weight(.medium))
                 }
@@ -140,12 +147,23 @@ struct PaywallScreen: View {
         .padding(.vertical, 9)
     }
 
-    @ViewBuilder
-    private func outcomeBanner(_ outcome: PurchaseOutcome) -> some View {
+    private func purchase() async {
+        isWorking = true
+        outcome = await model.purchasePremium()
+        isWorking = false
+        if case .purchased = outcome { dismiss() }
+    }
+}
+
+/// What came of a purchase, said the same way wherever Premium is sold.
+struct PurchaseOutcomeBanner: View {
+    let outcome: PurchaseOutcome
+
+    var body: some View {
         switch outcome {
         case .purchased:
             InfoBanner(title: "Premium is active",
-                       message: "Mistakes, the deepest reviews, bulk analysis and unlimited players are unlocked.",
+                       message: "Mistakes, the deepest reviews and unlimited players are unlocked.",
                        tone: .success)
         case .pending:
             InfoBanner(title: "Purchase pending", message: "It is waiting for approval. Nothing is lost while it waits.", tone: .info)
@@ -159,14 +177,36 @@ struct PaywallScreen: View {
                        tone: .warning)
         }
     }
+}
 
-    private func purchase() async {
-        isWorking = true
-        outcome = await model.entitlement.purchase()
-        isWorking = false
-        model.coordinator.updateEntitlement(isPremium: model.entitlement.state.isPremium)
-        model.touch()
-        if case .purchased = outcome { dismiss() }
+/// The plan's terms under a button that buys it, with the Terms and Privacy links: the free
+/// trial and what follows it while the account can still have one, the price otherwise.
+struct PlanTermsNote: View {
+    @Environment(AppModel.self) private var model
+    var alignment: TextAlignment = .center
+
+    var body: some View {
+        Text(note)
+            .font(.caption)
+            .foregroundStyle(Palette.inkTertiary)
+            .tint(Palette.inkSecondary)
+            .multilineTextAlignment(alignment)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var note: AttributedString {
+        let entitlement = model.entitlement
+        let terms: String
+        if let duration = entitlement.freeTrialDuration {
+            terms = "Free for \(duration), then \(entitlement.priceDescription). Cancel any time in Settings at least 24 hours before the trial ends."
+        } else if entitlement.product != nil {
+            terms = "\(entitlement.priceDescription), renews monthly until cancelled."
+        } else {
+            terms = "Billed monthly through your Apple Account until cancelled."
+        }
+        let markdown = "\(terms)\n[Terms](\(SiteLink.terms.absoluteString)) · [Privacy](\(SiteLink.privacy.absoluteString))"
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: markdown, options: options)) ?? AttributedString(terms)
     }
 }
 
@@ -235,7 +275,7 @@ struct SubscriptionScreen: View {
                     .disabled(isRestoring)
                 }
 
-                Text("Subscription status never removes a saved review. When the status cannot be read, bulk work simply waits and everything you already analysed stays exactly where it is.")
+                Text("Subscription status never removes a saved review. When the status cannot be read, everything you already analysed stays exactly where it is.")
                     .font(.caption)
                     .foregroundStyle(Palette.inkTertiary)
                     .fixedSize(horizontal: false, vertical: true)

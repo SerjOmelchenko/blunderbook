@@ -651,6 +651,7 @@ final class AnalysisCoordinator {
     private func handle(_ event: AnalysisEvent) {
         switch event {
         case .started(let key):
+            UsageAnalytics.shared.track(.analysisStarted(depth: effectiveReviewDepth))
             activeGames[key] = ActiveGame(label: label(for: key), startedAt: Date())
         case .progress(let key, let completed, let total):
             activeGames[key]?.completed = completed
@@ -658,22 +659,34 @@ final class AnalysisCoordinator {
         case .partial(let key, let moves):
             partialReviews[key] = moves
         case .finished(let key, let plies):
+            trackEnd(of: key, .finished)
             activeGames[key] = nil
             partialReviews[key] = nil
             recordThroughput(plies: plies)
             Task { await refreshCounts() }
         case .failed(let key, let message):
+            trackEnd(of: key, .failed)
             lastFailureMessage = message
             activeGames[key] = nil
             partialReviews[key] = nil
             Task { await refreshCounts() }
         case .interrupted(let key):
+            trackEnd(of: key, .interrupted)
             activeGames[key] = nil
             partialReviews[key] = nil
         case .idle:
             break
         }
         eventObserver?(event)
+    }
+
+    /// How long the game ran and how far it got, counted from its own start.
+    private func trackEnd(of gameKey: String, _ outcome: UsageAnalytics.AnalysisOutcome) {
+        guard let game = activeGames[gameKey] else { return }
+        let plies = ((try? games.game(key: gameKey)) ?? nil)?.plyCount ?? 0
+        UsageAnalytics.shared.track(.analysisEnded(outcome: outcome,
+                                                   seconds: Int(Date().timeIntervalSince(game.startedAt).rounded()),
+                                                   plies: plies, depth: effectiveReviewDepth))
     }
 
     /// Several games run at once, so the estimate comes from how often games finish across all

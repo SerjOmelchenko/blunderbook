@@ -6,7 +6,8 @@ built from the [development specification](../chess-ios-app-spec.md); where the 
 code is the reference.
 
 **Licence: GPLv3.** The app links Stockfish, so the whole application is GPLv3. See
-[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
+[LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). The name "Blunderbook" and its icon are trademarks
+and are not licensed under the GPL: a fork you publish needs its own name and icon.
 
 ## Build and run
 

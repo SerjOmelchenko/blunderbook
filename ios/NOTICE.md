@@ -3,6 +3,12 @@
 Blunderbook as a whole is distributed under the GNU General Public License version 3 or
 later. See [LICENSE](LICENSE) for the full text.
 
+**Additional term under GPLv3 section 7(e).** "Blunderbook" and the Blunderbook icon
+(`Blunderbook/AppIcon.icon`) are trademarks of Serhii Omelchenko, and no rights to them are
+granted under this licence. Anyone who distributes a modified version must give it a different
+name and icon and must not present it as the official Blunderbook. This term limits only the use
+of the name and icon; it does not restrict any right the GPL grants over the code.
+
 ## Stockfish
 
 The app links Stockfish directly into its binary. Linking makes the combined application a work

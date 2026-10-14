@@ -36,8 +36,8 @@ to you in connection with the distribution of this application:
 ### Source code
 
 The complete corresponding source for this build is published at
-`<REPLACE WITH YOUR REAL SOURCE URL>`. If you cannot obtain it there, contact
-`<REPLACE WITH YOUR CONTACT ADDRESS>` and it will be provided.
+<https://serhiiomelchenko.com/blunderbook-app/source/>. If you cannot obtain it there, contact
+<somelchenko.work@gmail.com> and it will be provided.
 
 This application includes Stockfish (<https://stockfishchess.org>), copyright © 2004–2026 The
 Stockfish developers, also licensed under GPLv3. Stockfish's sources are included, unmodified, in
@@ -62,14 +62,16 @@ requirement, or any claim arising under consumer protection or similar legislati
 subsidiaries are third-party beneficiaries of this agreement and may enforce its terms against
 you as they relate to your use of the application.
 
-### Not affiliated with Chess.com
+### Not affiliated with Chess.com or Lichess
 
-This application reads publicly available game data from Chess.com's Published-Data API. It is an
-independent work and is not affiliated with, endorsed by, or sponsored by Chess.com.
+This application reads publicly available game data from Chess.com's Published-Data API and the
+Lichess API. It is an independent work and is not affiliated with, endorsed by, or sponsored by
+Chess.com or Lichess.
 
 ### Subscription
 
-An optional subscription unlocks analysis beyond the free window. It is billed by Apple and
-managed in your Apple Account settings. Because this application is free software, nothing in
+An optional monthly subscription, Premium, adds the features listed on the app's Plan screen at
+the time of purchase. Analysing your games is free, and saved reviews stay readable on every plan.
+Premium is billed by Apple and managed in your Apple Account settings. Because this application is free software, nothing in
 GPLv3 prevents anyone from building and distributing a version without that check; the
 subscription supports development rather than restricting the software.

@@ -850,11 +850,6 @@ struct AboutScreen: View {
                     }
                 }
 
-                Text("The links below are development placeholders. A released build must point at the real corresponding source, privacy policy and terms.")
-                    .font(.caption)
-                    .foregroundStyle(Palette.brass)
-                    .fixedSize(horizontal: false, vertical: true)
-
                 VStack(alignment: .leading, spacing: 8) {
                     Link("Source code", destination: SiteLink.source)
                     Link("Privacy policy", destination: SiteLink.privacy)

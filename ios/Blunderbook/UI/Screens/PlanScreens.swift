@@ -36,31 +36,33 @@ struct PaywallScreen: View {
                             .accessibilityHidden(true)
                         Text("Premium")
                             .eyebrowStyle()
-                        Text("Every feature,\none plan.")
+                        Text("When you want\nto go deeper.")
                             .font(.display(.largeTitle))
                             .foregroundStyle(Palette.ink)
                             .fixedSize(horizontal: false, vertical: true)
-                        if let offer = offerLine {
-                            Text(offer)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(Palette.brass)
+                    }
+
+                    // Only what Premium adds; everything else is free on every plan.
+                    Panel {
+                        VStack(spacing: 0) {
+                            featureRow("Mistakes tab",
+                                       "Every error from your reviews in one list, your biggest leak and your opening hot spots.")
+                            Hairline()
+                            featureRow("Mistake drills",
+                                       "Each error comes back as a position. Find the better move.")
+                            Hairline()
+                            featureRow("\(ReviewDepth.deep.title) and \(ReviewDepth.deepest.title) reviews",
+                                       "\(Self.nodes(ReviewDepth.deep)) and \(Self.nodes(ReviewDepth.deepest)) nodes per position. Free goes up to \(ReviewDepth.deepestFree.title), \(Self.nodes(ReviewDepth.deepestFree)).")
+                            Hairline()
+                            featureRow("Unlimited players",
+                                       "Track any number of Chess.com and Lichess accounts. Free tracks \(FreePlan.playersDescription).")
                         }
                     }
 
-                    Panel {
-                        VStack(spacing: 0) {
-                            comparisonRow("Analyse a game you open", free: "Yes", premium: "Yes")
-                            Hairline()
-                            comparisonRow("Mistakes tab and puzzles", free: "No", premium: "Yes")
-                            Hairline()
-                            comparisonRow("Review depth", free: "Up to \(ReviewDepth.deepestFree.title)",
-                                          premium: "Up to \(ReviewDepth.deepest.title)")
-                            Hairline()
-                            comparisonRow("Tracked players", free: "\(FreePlan.maxPlayers)", premium: "Unlimited")
-                            Hairline()
-                            comparisonRow("Analysed games", free: "Kept for good", premium: "Kept for good")
-                        }
-                    }
+                    Text("Free stays free: analyse any game you open, and keep every review for good.")
+                        .font(.footnote)
+                        .foregroundStyle(Palette.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     if let outcome { PurchaseOutcomeBanner(outcome: outcome) }
 
@@ -77,6 +79,15 @@ struct PaywallScreen: View {
                         .buttonStyle(PrimaryButtonStyle())
                         .disabled(isWorking || model.entitlement.product == nil)
 
+                        // With a trial on offer the button starts it, so the price that follows sits
+                        // just under it; without one, the price is in the button itself.
+                        if model.entitlement.freeTrialLength != nil {
+                            Text("Then \(model.entitlement.priceDescription). Cancel anytime.")
+                                .font(.footnote)
+                                .foregroundStyle(Palette.inkSecondary)
+                                .frame(maxWidth: .infinity)
+                        }
+
                         Button("Restore purchases") {
                             Task {
                                 isWorking = true
@@ -89,11 +100,10 @@ struct PaywallScreen: View {
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
-                        if let length = model.entitlement.freeTrialLength {
-                            Text("The \(length) free trial turns into the monthly plan at \(model.entitlement.priceDescription) unless you cancel at least 24 hours before it ends. Nothing is charged during the trial.")
+                        if model.entitlement.freeTrialLength != nil {
+                            Text("Nothing is charged during the trial. Cancel at least 24 hours before it ends to avoid being billed.")
                         }
-                        Text("Billed through your Apple Account and renews monthly until cancelled. Manage or cancel it in Settings on this device. Restoring a purchase restores access, not your local games or reviews.")
-                        Text("Prices are shown by the App Store in your local currency.")
+                        Text("Billed through your Apple Account. Renews monthly until cancelled in Settings.")
                     }
                     .font(.caption)
                     .foregroundStyle(Palette.inkTertiary)
@@ -122,29 +132,31 @@ struct PaywallScreen: View {
         return "Subscribe · \(model.entitlement.priceDescription)"
     }
 
-    /// "Free for 7 days, then $4.99 / month", or just the price once the trial is used.
-    private var offerLine: String? {
-        guard model.entitlement.product != nil else { return nil }
-        guard let duration = model.entitlement.freeTrialDuration else { return model.entitlement.priceDescription }
-        return "Free for \(duration), then \(model.entitlement.priceDescription)"
+    /// "3M", for a depth's nodes per position.
+    private static func nodes(_ depth: ReviewDepth) -> String {
+        let millions = Double(depth.nodesPerPosition) / 1_000_000
+        return millions.formatted(.number.precision(.fractionLength(0...1))) + "M"
     }
 
-    private func comparisonRow(_ title: String, free: String, premium: String) -> some View {
-        HStack {
-            Text(title)
-                .font(.footnote)
-                .foregroundStyle(Palette.inkSecondary)
-            Spacer(minLength: 8)
-            Text(free)
-                .font(.caption)
-                .foregroundStyle(Palette.inkTertiary)
-                .frame(width: 92, alignment: .trailing)
-            Text(premium)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Palette.brand)
-                .frame(width: 96, alignment: .trailing)
+    private func featureRow(_ title: String, _ detail: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: "checkmark")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Palette.brass)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Palette.ink)
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 9)
+        .padding(.vertical, 10)
+        .accessibilityElement(children: .combine)
     }
 
     private func purchase() async {

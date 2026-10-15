@@ -567,7 +567,7 @@ final class StatisticsRepository {
     }
 }
 
-// MARK: - Game review context
+// MARK: - Game screen context
 
 /// The player's results in one opening, for the review's opening row.
 struct OpeningRecord: Equatable {

@@ -111,10 +111,13 @@ final class MistakeDrillModel {
         if let attempt {
             presentation.lastMove = attempt
             switch phase {
-            case .solved:
-                presentation.badge = SquareBadge(square: attempt.toSquare, text: "", color: Palette.best, symbol: "checkmark")
-            case .wrong:
-                presentation.badge = SquareBadge(square: attempt.toSquare, text: "", color: Palette.blunder, symbol: "xmark")
+            case .solved(_, let isEngineMove):
+                presentation.badge = SquareBadge(square: attempt.toSquare, grade: isEngineMove ? .best : .good)
+            case .wrong(_, let loss, let isGameMove):
+                // The try's own grade; without an engine to measure it, the game move keeps its label.
+                let severity = loss.flatMap(Scoring.severity(forLoss:)) ?? (isGameMove ? occurrence.severity : nil)
+                presentation.badge = SquareBadge(square: attempt.toSquare,
+                                                 grade: MoveGrade(severity: severity ?? .mistake, isBest: false))
             default:
                 break
             }
@@ -711,7 +714,7 @@ struct MistakeDrillScreen: View {
     private var controls: some View {
         HStack(spacing: 12) {
             if onSampleSolved == nil {
-                NavigationLink(value: Route.gameReview(gameKey: occurrence.gameKey, ply: occurrence.ply)) {
+                NavigationLink(value: Route.game(gameKey: occurrence.gameKey, ply: occurrence.ply)) {
                     Text("Open game")
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 18)

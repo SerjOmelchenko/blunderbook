@@ -29,7 +29,7 @@ struct BoardPresentation: Equatable {
     var targetSquares: [Int] = []
     var checkSquare: Int?
     var evidenceSquares: [Int] = []
-    /// A small mark in the corner of a square: a deep review's verdict on the move that landed there.
+    /// A star in the corner of a square: the grade of the move that landed there.
     var badge: SquareBadge?
     /// The first move of each live engine line, best first.
     var lineArrows: [Move] = []
@@ -75,10 +75,7 @@ struct BoardPresentation: Equatable {
 
 struct SquareBadge: Equatable {
     var square: Int
-    var text: String
-    var color: Color
-    /// An SF Symbol drawn instead of `text`, such as the book for a book move.
-    var symbol: String?
+    var grade: MoveGrade
 }
 
 /// How the pieces get from one position to the next: who slides where, who is taken, and who
@@ -176,6 +173,13 @@ struct BoardView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay {
+                // Outside the clip, so a star on the edge and its sparks can reach past the board.
+                if let badge = presentation.badge {
+                    MoveStarLayer(badge: badge, orientation: presentation.orientation, square: square)
+                        .id("\(badge.square)-\(badge.grade)-\(presentation.lastMove?.uci ?? "")")
+                }
+            }
+            .overlay {
                 // A hypothetical line is outlined so it is never mistaken for the game itself.
                 if presentation.isHypothetical {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -237,6 +241,26 @@ private struct LineArrowsLayer: View {
     }
 
     static func shaftWidth(rank: Int) -> CGFloat { [0.17, 0.13, 0.11][min(rank, 2)] }
+}
+
+/// The move's star, in the top-right of the square it landed on. It follows the piece in, a
+/// beat after the slide.
+private struct MoveStarLayer: View {
+    let badge: SquareBadge
+    let orientation: PieceColor
+    let square: CGFloat
+
+    var body: some View {
+        let centre = BoardGeometry(orientation: orientation).centre(of: badge.square, size: square)
+        ZStack(alignment: .topLeading) {
+            MoveStar(grade: badge.grade, size: square * 0.42, style: .board, delay: 0.2)
+                .shadow(color: .black.opacity(0.45), radius: 1.5, y: 1)
+                .position(x: centre.x + square * 0.31, y: centre.y - square * 0.31)
+        }
+        .frame(width: square * 8, height: square * 8, alignment: .topLeading)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
 }
 
 /// Rings around the squares a pattern is about. Each tightens onto its square as the move lands,
@@ -424,9 +448,6 @@ private struct AnimatedBoardCanvas: View, Animatable {
             faded.opacity = max(0, (arrival - 0.25) / 0.75)
             drawArrow(in: &faded, move: threat, size: size, color: Palette.blunder.opacity(0.82))
         }
-        if let badge = presentation.badge {
-            drawBadge(in: &context, badge: badge, size: size, arrival: arrival)
-        }
     }
 
     private func drawCoordinate(in context: inout GraphicsContext, index: Int, rect: CGRect,
@@ -530,24 +551,6 @@ private struct AnimatedBoardCanvas: View, Animatable {
                                  y: end.y - sin(angle + .pi / 7) * headLength))
         head.closeSubpath()
         context.fill(head, with: .color(color))
-    }
-
-    /// A round mark over the top-right corner of the square, popping in as the move lands.
-    private func drawBadge(in context: inout GraphicsContext, badge: SquareBadge, size: CGFloat, arrival: Double) {
-        guard arrival > 0 else { return }
-        let centre = geometry.centre(of: badge.square, size: size)
-        // A slight overshoot, then settle.
-        let scale = arrival < 0.7 ? arrival / 0.7 * 1.15 : 1.15 - (arrival - 0.7) / 0.3 * 0.15
-        let radius = size * 0.2 * scale
-        let point = CGPoint(x: centre.x + size * 0.36, y: centre.y - size * 0.36)
-        let circle = Path(ellipseIn: CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2))
-        context.fill(circle, with: .color(badge.color))
-        context.stroke(circle, with: .color(Color.black.opacity(0.35)), lineWidth: 1)
-        let label = badge.symbol.map { Text(Image(systemName: $0)) } ?? Text(badge.text)
-        let text = context.resolve(label
-            .font(.system(size: max(7, size * (badge.symbol == nil ? 0.19 : 0.16) * scale), weight: .heavy))
-            .foregroundStyle(Palette.onBrand))
-        context.draw(text, at: point, anchor: .center)
     }
 }
 

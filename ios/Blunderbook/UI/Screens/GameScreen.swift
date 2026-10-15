@@ -11,7 +11,7 @@ import SwiftUI
 
 @MainActor
 @Observable
-final class GameReviewModel {
+final class GameModel {
     private(set) var entry: GameListEntry?
     private(set) var analysis: GameAnalysis?
     private(set) var moves: [Move] = []
@@ -25,7 +25,7 @@ final class GameReviewModel {
     private(set) var openingTrace = OpeningTrace.empty
     /// The game's clock move by move, when its PGN carries one.
     private(set) var clock: GameClock?
-    /// Key moments, accuracy by phase and the rest of what a deep review says about the game.
+    /// Turning points, accuracy by phase and the rest of what a deep review says about the game.
     private(set) var insights = ReviewInsights.empty
     /// The player's results in this game's opening, from two games up.
     private(set) var openingRecord: OpeningRecord?
@@ -114,7 +114,7 @@ final class GameReviewModel {
             openingRecord = (record?.games ?? 0) >= 2 ? record : nil
 
             // A review reads from the start of the game, like a scoresheet. Mistakes stay one tap
-            // away through Next key moment; a caller that wants a particular move passes it in.
+            // away through Next turning point; a caller that wants a particular move passes it in.
             if let initialPly {
                 ply = min(max(0, initialPly + 1), lastPly)
             } else {
@@ -211,6 +211,12 @@ final class GameReviewModel {
 
     func isError(_ move: MoveAnalysis) -> Bool { severity(of: move) != nil }
 
+    /// The star a deep review gives a move; none for a book move or one without labels yet.
+    func grade(of move: MoveAnalysis) -> MoveGrade? {
+        guard let labels = move.labels, !isBook(ply: move.ply) else { return nil }
+        return MoveGrade(severity: severity(of: move), isBest: labels.isBest)
+    }
+
     /// What kind of mistake a move was, as Mistakes names it: its first pattern, or its
     /// consequence when no pattern explains it.
     func kindLabel(of move: MoveAnalysis) -> String? {
@@ -242,7 +248,8 @@ final class GameReviewModel {
         }
         if insights.moments[index] == .punished {
             let taken = shownMoves.first { $0.ply == index - 1 }
-            return .punished(kind: taken.flatMap(kindLabel(of:)), clockLeft: clock?.remaining[safe: index] ?? nil)
+            return .punished(grade(of: move) ?? .good, kind: taken.flatMap(kindLabel(of:)),
+                             clockLeft: clock?.remaining[safe: index] ?? nil)
         }
         return nil
     }
@@ -272,15 +279,10 @@ final class GameReviewModel {
                                              orientation: orientation,
                                              lastMove: lastMove,
                                              checkSquare: checkSquares[index])
-        guard !isSummary, let lastMove else { return presentation }
-        if isBookMove {
-            presentation.badge = SquareBadge(square: lastMove.toSquare, text: "", color: Palette.book, symbol: "book.fill")
-            return presentation
-        }
-        guard let move = currentMove else { return presentation }
+        guard !isSummary, let lastMove, !isBookMove, let move = currentMove else { return presentation }
+        presentation.badge = grade(of: move).map { SquareBadge(square: lastMove.toSquare, grade: $0) }
         let mine = move.mover == playerColor
-        if let severity = severity(of: move) {
-            presentation.badge = SquareBadge(square: lastMove.toSquare, text: severity.marker, color: severity.color)
+        if severity(of: move) != nil {
             if mine {
                 // What to play instead, and how the opponent punishes what was played.
                 presentation.suggestedMove = move.labels?.bestLineUCI.first.flatMap(Move.fromUCI)
@@ -293,8 +295,6 @@ final class GameReviewModel {
                 presentation.targetRings = targets(of: move)
                 presentation.ringColor = Palette.best
             }
-        } else if insights.moments[move.ply] == .punished {
-            presentation.badge = SquareBadge(square: lastMove.toSquare, text: "", color: Palette.best, symbol: "checkmark")
         }
         return presentation
     }
@@ -333,10 +333,10 @@ final class GameReviewModel {
         (analysis?.moves ?? []).filter { isError($0) && $0.mover == playerColor }.map(\.ply)
     }
 
-    /// The positions after the key moments: the player's errors and the chances they took.
+    /// The positions after the turning points: the player's errors and the chances they took.
     private var keyPlies: [Int] { insights.keyMoments.map { $0 + 1 } }
 
-    /// Where Next key moment goes: the next one, then the summary, then back to the start.
+    /// Where Next turning point goes: the next one, then the summary, then back to the start.
     var nextKeyPly: Int {
         if isSummary { return 0 }
         return keyPlies.first { $0 > ply } ?? lastPly
@@ -344,7 +344,7 @@ final class GameReviewModel {
 
     var nextKeyTitle: String {
         if isSummary { return "Back to start" }
-        return keyPlies.contains { $0 > ply } ? "Next key moment" : "Summary"
+        return keyPlies.contains { $0 > ply } ? "Next turning point" : "Summary"
     }
 
     var previousKeyPly: Int? { keyPlies.last { $0 < ply } }
@@ -410,7 +410,8 @@ final class GameReviewModel {
         }
         if let worst = insights.biggestError, let move = analysis.moves[safe: worst], let severity = severity(of: move) {
             let best = move.labels?.bestMoveSAN.map { " · best was \($0)" } ?? ""
-            facts.append(.init(label: "Biggest swing", value: moveLabel(worst) + severity.marker + best, ply: worst + 1))
+            facts.append(.init(label: "Biggest swing", value: moveLabel(worst) + " · " + severity.label.lowercased() + best,
+                               ply: worst + 1))
         }
         let taken = insights.moments.filter { $0.value == .punished }.map(\.key).sorted()
         let missed = insights.moments.filter { $0.value == .missedChance }.map(\.key).sorted()
@@ -445,7 +446,7 @@ private extension Array {
     subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }
 
-// MARK: - W09 Game review
+// MARK: - W09 Game
 
 /// Where the analysis happens. The board runs edge to edge under a thin evaluation line, the
 /// engine's live lines sit right under it, and the game is stepped through with a small floating
@@ -453,7 +454,7 @@ private extension Array {
 ///
 /// Opening a game starts its analysis, at the deepest level the app runs (`DeepReview`), unless
 /// it already has one. There is no separate quick analysis to choose.
-struct GameReviewScreen: View {
+struct GameScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -461,7 +462,7 @@ struct GameReviewScreen: View {
     let gameKey: String
     let initialPly: Int?
 
-    @State private var review = GameReviewModel()
+    @State private var review = GameModel()
     @State private var liveLines = LiveLinesModel()
     /// Cached rather than queried from the body: the body re-evaluates on every drag of the
     /// evaluation graph, and a database hit per frame is not acceptable there.
@@ -527,7 +528,7 @@ struct GameReviewScreen: View {
         #endif
         // The review is a focused task: its own controls replace the tab bar.
         .toolbar(.hidden, for: .tabBar)
-        .navigationTitle(review.entry?.opponent.username ?? "Game review")
+        .navigationTitle(review.entry?.opponent.username ?? "Game")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -724,11 +725,12 @@ struct GameReviewScreen: View {
         let ply = review.ply
         let square = review.moves[ply - 1].toSquare
         Task { @MainActor in
-            // Let the verdict badge land on the board first; by then a review opened straight
+            // Let the star land on the board and break first; by then a review opened straight
             // onto this move has been laid out too.
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: 900_000_000)
             guard boardFrame != .zero, trayFrame != .zero else { return land() }
-            let flight = MistakeFlight(text: "\(severity.marker) \(move.san)",
+            let flight = MistakeFlight(text: move.san,
+                                       grade: MoveGrade(severity: severity, isBest: false),
                                        color: severity.color,
                                        start: squareCentre(square),
                                        end: CGPoint(x: trayFrame.midX, y: trayFrame.midY))
@@ -999,16 +1001,15 @@ struct GameReviewScreen: View {
         return HStack(spacing: 6) {
             HStack(spacing: 6) {
                 if isBook {
-                    Label("Book", systemImage: "book.fill")
-                        .labelStyle(.titleAndIcon)
+                    Text("Book")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Palette.book)
+                        .foregroundStyle(Palette.inkSecondary)
                         .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .leading)))
                 }
                 if isExit {
                     Text(review.theoryMove.map { "Out of book · theory was \($0)" } ?? "Out of book")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(Palette.book)
+                        .foregroundStyle(Palette.inkSecondary)
                         .lineLimit(1)
                         .transition(.opacity.combined(with: .offset(y: 5)))
                 } else if let opening {
@@ -1165,40 +1166,31 @@ struct GameReviewScreen: View {
     private enum ChipMarker: Equatable {
         /// Which way the move moved the evaluation bar for the side that played it.
         case trend(EvalTrend)
-        /// A deep review's label on one of the tracked player's moves; a missed chance adds a
-        /// dashed ring.
-        case severity(Severity, missedChance: Bool)
-        /// The opponent's error, quieter: it is the player's chance, not their mistake.
-        case opponentSeverity(Severity)
-        /// The player took the opponent's error.
-        case punished
-        /// Known opening theory, for either side.
+        /// A deep review's star. The opponent's is quieter; a missed chance adds a dashed ring.
+        case grade(MoveGrade, isOpponent: Bool, missedChance: Bool)
+        /// Known opening theory, for either side: no mark, the move is set in grey.
         case book
         case summary
 
         var accessibilityText: String {
             switch self {
             case .trend(let trend): return trend.label
-            case .severity(let severity, let missed): return severity.label + (missed ? ", missed chance" : "")
-            case .opponentSeverity(let severity): return "opponent's \(severity.label.lowercased())"
-            case .punished: return "punished"
+            case .grade(let grade, let isOpponent, let missed):
+                return (isOpponent ? "opponent's \(grade.label.lowercased())" : grade.label) + (missed ? ", missed chance" : "")
             case .book: return "book move"
             case .summary: return "game summary"
             }
         }
     }
 
-    /// A deep review marks errors for both sides and the chances taken; a quicker review marks
-    /// every move's trend.
+    /// A deep review gives every move its star; a quicker review marks every move's trend.
     private func marker(for move: MoveAnalysis?) -> ChipMarker? {
         guard let move else { return nil }
         if review.showsLabels {
-            if let severity = review.severity(of: move) {
-                return move.mover == review.playerColor
-                    ? .severity(severity, missedChance: review.insights.moments[move.ply] == .missedChance)
-                    : .opponentSeverity(severity)
+            return review.grade(of: move).map {
+                .grade($0, isOpponent: move.mover != review.playerColor,
+                       missedChance: review.insights.moments[move.ply] == .missedChance)
             }
-            return review.insights.moments[move.ply] == .punished ? .punished : nil
         }
         return move.trend == .level ? nil : .trend(move.trend)
     }
@@ -1230,28 +1222,17 @@ struct GameReviewScreen: View {
                         Image(systemName: trend.symbol)
                             .font(.caption2.weight(.bold))
                             .foregroundStyle(isSelected ? Palette.onBrand : trend.color)
-                    case .severity(let severity, let missed):
-                        Text(severity.marker)
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(isSelected ? Palette.onBrand : severity.color)
+                    case .grade(let grade, let isOpponent, let missed):
+                        MoveStar(grade: grade, size: 13, tint: isSelected ? Palette.onBrand : nil)
+                            .opacity(isOpponent && !isSelected ? 0.55 : 1)
                         if missed {
                             Circle()
                                 .strokeBorder(isSelected ? Palette.onBrand : Palette.brand,
                                               style: StrokeStyle(lineWidth: 1, dash: [1.6, 1.2]))
                                 .frame(width: 6, height: 6)
                         }
-                    case .opponentSeverity(let severity):
-                        Text(severity.marker)
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(isSelected ? Palette.onBrand : severity.color.opacity(0.55))
-                    case .punished:
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 9, weight: .heavy))
-                            .foregroundStyle(isSelected ? Palette.onBrand : Palette.best)
                     case .book:
-                        Image(systemName: "book.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(isSelected ? Palette.onBrand : Palette.book)
+                        EmptyView()
                     case .summary:
                         Image(systemName: "chart.bar.fill")
                             .font(.system(size: 9, weight: .bold))
@@ -1260,7 +1241,7 @@ struct GameReviewScreen: View {
                         EmptyView()
                     }
                 }
-                .foregroundStyle(isSelected ? Palette.onBrand : Palette.ink)
+                .foregroundStyle(isSelected ? Palette.onBrand : marker == .book ? Palette.inkSecondary : Palette.ink)
                 .padding(.horizontal, 11)
                 .frame(minHeight: 32)
                 .background {
@@ -1290,7 +1271,7 @@ struct GameReviewScreen: View {
     // MARK: Controls
 
     /// Its own row under the review, never over it: step back at the far left, forward at the far
-    /// right, and the jump between key moments well clear of both in the middle, so a thumb aimed
+    /// right, and the jump between turning points well clear of both in the middle, so a thumb aimed
     /// at one never lands on another.
     private var controls: some View {
         HStack(spacing: 12) {
@@ -1353,13 +1334,13 @@ struct GameReviewScreen: View {
                 .contentShape(Rectangle())
         }
         .contextMenu {
-            Button("Previous key moment", systemImage: "chevron.backward.2") {
+            Button("Previous turning point", systemImage: "chevron.backward.2") {
                 if let ply = review.previousKeyPly { go(to: ply) }
             }
             .disabled(review.previousKeyPly == nil)
             Button("Summary", systemImage: "chart.bar") { go(to: review.lastPly) }
         }
-        .accessibilityAction(named: "Previous key moment") {
+        .accessibilityAction(named: "Previous turning point") {
             if let ply = review.previousKeyPly { go(to: ply) }
         }
     }
@@ -1369,6 +1350,7 @@ struct GameReviewScreen: View {
 struct MistakeFlight: Identifiable, Equatable {
     let id = UUID()
     var text: String
+    var grade: MoveGrade
     var color: Color
     var start: CGPoint
     var end: CGPoint
@@ -1397,7 +1379,10 @@ private struct FlyingMistakeChip: View {
     @State private var hasAppeared = false
 
     var body: some View {
-        Text(flight.text)
+        HStack(spacing: 4) {
+            MoveStar(grade: flight.grade, size: 13, tint: Palette.onBrand)
+            Text(flight.text)
+        }
             .font(.footnote.weight(.heavy))
             .foregroundStyle(Palette.onBrand)
             .padding(.horizontal, 10)

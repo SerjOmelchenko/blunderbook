@@ -12,7 +12,7 @@ import SwiftUI
 /// Destinations pushed inside a root tab's navigation stack.
 enum Route: Hashable {
     /// A game as it is: opening it never starts an analysis.
-    case gameReview(gameKey: String, ply: Int?)
+    case game(gameKey: String, ply: Int?)
     case mistakeDrill(MistakeOccurrence)
     /// Several mistakes drilled one after another, then the session's result.
     case training([MistakeOccurrence])
@@ -24,7 +24,7 @@ enum Route: Hashable {
     /// The name usage events give this screen. Never the game or mistake it shows.
     var screenName: String {
         switch self {
-        case .gameReview: return "Game review"
+        case .game: return "Game"
         case .mistakeDrill: return "Mistake drill"
         case .training: return "Training"
         case .explore: return "Explore"
@@ -172,10 +172,10 @@ struct RootView: View {
         model.coordinator.counts.pending + model.coordinator.counts.running > 0
     }
 
-    /// A game review shows its own analysis, and its controls sit where the accessory would.
+    /// A game screen shows its own analysis, and its controls sit where the accessory would.
     private var isReviewingGame: Bool {
         switch paths[model.selectedTab]?.last {
-        case .gameReview, .mistakeDrill, .training, .explore: return true
+        case .game, .mistakeDrill, .training, .explore: return true
         default: return false
         }
     }
@@ -187,7 +187,7 @@ struct RootView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             model.reveal?.isCovered = true
-            paths[reveal.tab, default: []].append(.gameReview(gameKey: reveal.gameKey, ply: nil))
+            paths[reveal.tab, default: []].append(.game(gameKey: reveal.gameKey, ply: nil))
             if !reduceMotion { revealScale = RevealPortal.gameStartScale }
         }
     }
@@ -231,7 +231,7 @@ struct RootView: View {
         guard dueTrialOffer == nil, trialOffer == nil else { return }
         for (tab, path) in old where !path.isEmpty && (new[tab] ?? []).isEmpty {
             let gameKey = path.reversed().lazy.compactMap { route -> String? in
-                if case .gameReview(let key, _) = route { return key }
+                if case .game(let key, _) = route { return key }
                 return nil
             }.first
             guard let gameKey else { continue }
@@ -318,8 +318,8 @@ struct RootView: View {
                 paths[model.selectedTab] = []
             }
         }
-        if DevelopmentSeed.opensExplore, case .gameReview(let key, let ply)? = DevelopmentSeed.startupRoute {
-            let review = GameReviewModel()
+        if DevelopmentSeed.opensExplore, case .game(let key, let ply)? = DevelopmentSeed.startupRoute {
+            let review = GameModel()
             review.load(app: model, gameKey: key, initialPly: ply)
             if let start = review.exploreStart { paths[model.selectedTab, default: []].append(.explore(start)) }
         }
@@ -399,7 +399,7 @@ struct RootView: View {
     @ViewBuilder
     private func routeView(_ route: Route) -> some View {
         switch route {
-        case .gameReview(let key, let ply): GameReviewScreen(gameKey: key, initialPly: ply)
+        case .game(let key, let ply): GameScreen(gameKey: key, initialPly: ply)
         case .mistakeDrill(let occurrence): MistakeDrillScreen(occurrence: occurrence)
         case .training(let queue): MistakeDrillScreen(queue: queue)
         case .explore(let start): ExploreScreen(start: start, mode: startupExploreMode)

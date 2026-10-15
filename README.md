@@ -19,7 +19,7 @@ engine would have played instead. No account, no server doing the thinking.
 - **Stockfish on the device.** Every position is searched by Stockfish 19 running in the app,
   and its evaluations are kept exactly as given.
 - **One game, in depth.** Open a game and every move is scored by how far it moved the evaluation
-  bar, with key moments, Stockfish's three best lines for any position, and accuracy.
+  bar, with turning points, Stockfish's three best lines for any position, and accuracy.
 - **Three accuracy rings:** this game, the last 30 days and the last 12 months, measured the same
   way for both sites.
 - **Mistakes, drilled.** Errors from your reviews in one list, the pattern costing you most, and

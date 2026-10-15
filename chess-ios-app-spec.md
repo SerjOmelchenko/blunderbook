@@ -89,7 +89,7 @@ searches every position of the game once, at the review depth chosen in Settings
 from the two searches around it (the engine's own choice loses nothing): loss, accuracy, severity (5/10/20 thresholds), phase,
 evidence-based pattern tags, consequence, explanation and the engine's best move and line, plus each
 colour's game accuracy. Opening a game in the review starts its deep review automatically when it has none (updated 2026-10-08: there is no separate quick analysis of a single game). A deep review replaces a standard review of the game; a standard analysis
-never replaces a deep review. The Mistakes tab counts the tracked player's moves in deep reviews only.
+never replaces a deep review. The Mistakes tab counts the tracked player's moves in deep reviews only. Each move's grade is shown as a star (changed 2026-10-15): Best for the engine's own choice, Good for any other move under 5 points, then the three errors; book moves get none.
 
 #### Review depth (changed 2026-10-12)
 
@@ -225,7 +225,7 @@ First launch with no player opens Welcome. Otherwise restore selected player/tab
 | W06 | Opening detail | Matching games and reviews |
 | W07 | Games | Eligible / Saved reviews; filter; review; analyze previous 100; queue |
 | W08 | Filters | Class/date/color/rated/status; apply/reset/cancel |
-| W09 | Game review | Select move/graph; next/previous error; flip; continuation |
+| W09 | Game | Select move/graph; next/previous error; flip; continuation |
 | W10 | Continuation | Actual / Better line; step ply; return |
 | W11 | Individual analysis | Progress; stop; completed review; retry |
 | W15 | Queue | Pause/resume/cancel; retry failed; completed reviews |

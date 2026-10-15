@@ -203,7 +203,7 @@ struct GameList: View {
                 // Two targets side by side, never one inside the other: the row opens the game
                 // as it is, without starting an analysis; the rings act on their own.
                 HStack(spacing: 4) {
-                    NavigationLink(value: Route.gameReview(gameKey: entry.game.gameKey, ply: nil)) {
+                    NavigationLink(value: Route.game(gameKey: entry.game.gameKey, ply: nil)) {
                         GameRow(entry: entry)
                     }
                     .buttonStyle(.plain)

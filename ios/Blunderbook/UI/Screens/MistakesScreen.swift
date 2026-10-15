@@ -261,7 +261,7 @@ struct MistakesContent: View {
         var actions: [SwipeAction] = []
         if ignore != nil {
             actions.append(.init(title: "Open game", symbol: "arrow.up.forward.square", tint: Palette.brand) {
-                navigate(.gameReview(gameKey: occurrence.gameKey, ply: occurrence.ply))
+                navigate(.game(gameKey: occurrence.gameKey, ply: occurrence.ply))
             })
         }
         if let ignore {

@@ -73,6 +73,11 @@ struct RootView: View {
                                 .toolbar { toolbar(for: tab) }
                                 .navigationDestination(for: Route.self, destination: destination)
                                 .screenBackground()
+                                .background(TabSelectionGate(index: RootTab.allCases.firstIndex(of: .mistakes)) {
+                                    guard model.isMistakesLocked else { return true }
+                                    showsMistakesPreview = true
+                                    return false
+                                })
                         }
                         .tabItem { Label(tab.title, systemImage: symbol(for: tab)) }
                         .tag(tab)
@@ -134,7 +139,8 @@ struct RootView: View {
     }
 
     /// The tab bar's selection. Tapping the locked Mistakes tab opens its preview and leaves the
-    /// current tab where it is.
+    /// current tab where it is: `TabSelectionGate` stops the tap before the tab bar switches, and
+    /// this refuses any other way the selection could still arrive.
     private var tabSelection: Binding<RootTab> {
         Binding(get: { model.selectedTab }, set: { tab in
             if tab == .mistakes, model.isMistakesLocked {
@@ -478,6 +484,74 @@ struct QueueAccessoryModifier: ViewModifier {
                 }
         } else {
             content
+        }
+    }
+}
+
+/// Lets the app turn down a tab before the tab bar switches to it. The tab bar switches first
+/// and only then tells SwiftUI's selection, so a selection that refuses a tab switches to it and
+/// straight back; on iOS 26 that left the tab it came from laid out under its own navigation bar
+/// (the Games list under its title, and every game opened from there under the status bar).
+///
+/// Placed in a tab's content, it finds the tab bar controller and puts itself in front of
+/// SwiftUI's delegate, passing everything else through. `shouldSelect` is asked about the tab at
+/// `index` only.
+struct TabSelectionGate: UIViewControllerRepresentable {
+    let index: Int?
+    let shouldSelect: () -> Bool
+
+    func makeUIViewController(context: Context) -> Probe { Probe() }
+
+    func updateUIViewController(_ probe: Probe, context: Context) {
+        probe.gate.index = index
+        probe.gate.shouldSelect = shouldSelect
+    }
+
+    final class Probe: UIViewController {
+        let gate = Gate()
+
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            install()
+        }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            install()
+        }
+
+        /// Again on every appearance, in case SwiftUI has set its own delegate back. One gate is
+        /// enough: every tab carries one, and they must not end up forwarding to each other.
+        private func install() {
+            guard let tabBarController, !(tabBarController.delegate is Gate) else { return }
+            gate.forwarded = tabBarController.delegate
+            tabBarController.delegate = gate
+        }
+    }
+
+    final class Gate: NSObject, UITabBarControllerDelegate {
+        weak var forwarded: UITabBarControllerDelegate?
+        var index: Int?
+        var shouldSelect: () -> Bool = { true }
+
+        func tabBarController(_ tabBarController: UITabBarController, shouldSelect viewController: UIViewController) -> Bool {
+            if let index, tabBarController.viewControllers?.firstIndex(of: viewController) == index, !shouldSelect() {
+                return false
+            }
+            return forwarded?.tabBarController?(tabBarController, shouldSelect: viewController) ?? true
+        }
+
+        override func responds(to selector: Selector!) -> Bool {
+            super.responds(to: selector) || forwarded?.responds(to: selector) == true
+        }
+
+        override func forwardingTarget(for selector: Selector!) -> Any? {
+            forwarded?.responds(to: selector) == true ? forwarded : super.forwardingTarget(for: selector)
         }
     }
 }

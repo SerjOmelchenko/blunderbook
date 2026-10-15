@@ -10,7 +10,7 @@
 import XCTest
 @testable import Blunderbook
 
-/// What the game review works out on screen: clocks from the PGN, material, key moments, the
+/// What the game screen works out on screen: clocks from the PGN, material, turning points, the
 /// squares a pattern is about, theory where the game left the book, and the player's history.
 final class ReviewInsightsTests: XCTestCase {
 
@@ -66,7 +66,7 @@ final class ReviewInsightsTests: XCTestCase {
         XCTAssertEqual(balance.lead(for: .black), 0)
     }
 
-    // MARK: Key moments
+    // MARK: Turning points
 
     private func move(_ ply: Int, loss: Double, severity: Severity?, phase: GamePhase = .middlegame) -> MoveAnalysis {
         MoveAnalysis(ply: ply, mover: ply % 2 == 0 ? .white : .black, san: "a3", uci: "a2a3",

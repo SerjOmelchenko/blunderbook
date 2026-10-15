@@ -50,7 +50,7 @@ enum DevelopmentSeed {
 
     nonisolated static var startupRoute: Route? {
         if let key = argument("-open-game") {
-            return .gameReview(gameKey: key, ply: Int(argument("-ply") ?? ""))
+            return .game(gameKey: key, ply: Int(argument("-ply") ?? ""))
         }
         switch argument("-open-route") {
         case "queue": return .queue

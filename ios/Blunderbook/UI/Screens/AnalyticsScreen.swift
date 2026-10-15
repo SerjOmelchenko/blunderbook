@@ -453,7 +453,7 @@ struct AnalyticsScreen: View {
                 }
             }
             if game.hasDeepReview, !isBusy {
-                NavigationLink(value: Route.gameReview(gameKey: key, ply: nil)) { row }
+                NavigationLink(value: Route.game(gameKey: key, ply: nil)) { row }
                     .buttonStyle(.plain)
                     .accessibilityHint("Opens the game and its analysis")
             } else {

@@ -9,7 +9,7 @@
 
 import SwiftUI
 
-// The rows of the game review (W09) that say more than the board: who is playing and how they
+// The rows of the game screen (W09) that say more than the board: who is playing and how they
 // stand, what a move did, the game's shape, and its summary. Every row keeps one height whatever
 // it shows, so the board above never resizes.
 
@@ -172,8 +172,8 @@ enum ReviewVerdict: Equatable {
                best: LineSummary, punish: LineSummary)
     /// The opponent's error: the chance it gave. The live lines show how to take it.
     case chance(Severity, kind: String?)
-    /// The tracked player took the opponent's error.
-    case punished(kind: String?, clockLeft: TimeInterval?)
+    /// The tracked player took the opponent's error, with the star the taking move earned.
+    case punished(MoveGrade, kind: String?, clockLeft: TimeInterval?)
 
     struct LineSummary: Equatable {
         var score: EngineScore
@@ -221,7 +221,7 @@ struct VerdictPanel: View {
         HStack(spacing: 6) {
             switch verdict {
             case .error(let severity, let kind, let spent, let missed, let repeatCount, _, _):
-                VerdictBadge(text: severity.marker, color: severity.color)
+                MoveStar(grade: MoveGrade(severity: severity, isBest: false), size: 20, style: .board, delay: 0.1)
                 Text(severity.label).fontWeight(.bold).foregroundStyle(severity.color)
                 if let kind { dot; Text(kind).foregroundStyle(Palette.ink) }
                 if let spent { dot; spentLabel(spent) }
@@ -250,13 +250,14 @@ struct VerdictPanel: View {
                     .foregroundStyle(Palette.brand)
                 }
             case .chance(let severity, let kind):
-                VerdictBadge(text: severity.marker, color: severity.color, isHollow: true)
+                MoveStar(grade: MoveGrade(severity: severity, isBest: false), size: 20, style: .board, delay: 0.1)
+                    .opacity(0.55)
                 Text("Their \(severity.label.lowercased())").fontWeight(.bold).foregroundStyle(severity.color)
                 if let kind { dot; Text(kind).foregroundStyle(Palette.ink) }
                 Spacer(minLength: 4)
                 Text("Your chance").font(.caption.weight(.semibold)).foregroundStyle(Palette.best)
-            case .punished(let kind, let clockLeft):
-                VerdictBadge(symbol: "checkmark", color: Palette.best)
+            case .punished(let grade, let kind, let clockLeft):
+                MoveStar(grade: grade, size: 20, style: .board, bursts: false, delay: 0.1)
                 Text("Punished").fontWeight(.bold).foregroundStyle(Palette.best)
                 if let kind { dot; Text(kind).foregroundStyle(Palette.ink) }
                 Spacer(minLength: 4)
@@ -313,29 +314,6 @@ struct VerdictPanel: View {
         default: suffix = "th"
         }
         return "\(value)\(suffix)"
-    }
-}
-
-/// The round mark of a verdict, popping in as it arrives.
-struct VerdictBadge: View {
-    var text: String = ""
-    var symbol: String?
-    let color: Color
-    var isHollow = false
-    @State private var hasAppeared = false
-
-    var body: some View {
-        Group {
-            if let symbol { Image(systemName: symbol).font(.system(size: 9, weight: .heavy)) }
-            else { Text(text).font(.system(size: 10, weight: .heavy)) }
-        }
-        .foregroundStyle(isHollow ? color : Palette.onBrand)
-        .frame(width: 20, height: 20)
-        .background {
-            if isHollow { Circle().strokeBorder(color, lineWidth: 1.5) } else { Circle().fill(color) }
-        }
-        .scaleEffect(hasAppeared ? 1 : 0.2)
-        .onAppear { withAnimation(.spring(response: 0.32, dampingFraction: 0.55)) { hasAppeared = true } }
     }
 }
 
@@ -678,10 +656,15 @@ struct SummaryCard: View {
             HStack(spacing: 5) {
                 ForEach([Severity.inaccuracy, .mistake, .blunder], id: \.self) { severity in
                     let count = side.errors[severity] ?? 0
-                    Text(verbatim: "\(severity.marker) \(count)")
+                    HStack(spacing: 3) {
+                        MoveStar(grade: MoveGrade(severity: severity, isBest: false), size: 11)
+                            .opacity(count > 0 ? 1 : 0.4)
+                        Text(verbatim: "\(count)")
+                    }
                         .font(.caption2.weight(.bold))
                         .monospacedDigit()
                         .foregroundStyle(count > 0 ? severity.color : Palette.inkTertiary)
+                        .accessibilityLabel("\(count) \(severity.label.lowercased())\(count == 1 ? "" : "s")")
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Color.white.opacity(0.06)))

@@ -21,7 +21,7 @@ Exit: a legal PGN produces persisted, repeatable versioned per-move scores; canc
 
 Exit: fixtures containing 1,001 eligible games, duplicates, unsupported games and partial refreshes produce the exact expected window without losing saved data.
 
-## 3. Single-game review
+## 3. Single-game analysis
 
 - Implement loss, per-move accuracy and game accuracy (one method for every provider, spec §5 Accuracy), confirmation searches, phases and mate/terminal handling; analyze both colors but aggregate only the selected player's moves.
 - Build W09–W11 and W26. Board navigation supports actual moves, eval selection, orientation, error navigation and separate hypothetical continuation.

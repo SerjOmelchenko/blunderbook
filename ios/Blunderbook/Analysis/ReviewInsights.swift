@@ -121,7 +121,7 @@ enum MoveMoment: Equatable {
 struct ReviewInsights: Equatable {
     /// By move index, for the tracked player's moves.
     var moments: [Int: MoveMoment] = [:]
-    /// The tracked player's errors, missed chances and punished errors, in order: Next key moment
+    /// The tracked player's errors, missed chances and punished errors, in order: Next turning point
     /// steps through these. Move indices.
     var keyMoments: [Int] = []
     /// First move index of each phase the game reached.

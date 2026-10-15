@@ -58,7 +58,7 @@ enum AnalysisPolicy {
     }
 }
 
-/// The deep review of one game: the labelled analysis behind the game review, the Mistakes tab and
+/// The deep review of one game: the labelled analysis behind the game screen, the Mistakes tab and
 /// the accuracy rings.
 ///
 /// Changed 2026-10-12: every position is searched once at the chosen level's budget, the way
@@ -179,8 +179,8 @@ struct AnalysisProvenance: Hashable, Codable {
     var taggerVersion: String
 }
 
-/// §5 severity ladder, used by deep reviews. Absent for non-errors; there is no
-/// Excellent/Good/Brilliant taxonomy.
+/// §5 severity ladder, used by deep reviews. Absent for non-errors; the star a move earns
+/// otherwise is its `MoveGrade`.
 enum Severity: String, Codable, CaseIterable, Hashable {
     case inaccuracy
     case mistake
@@ -194,20 +194,40 @@ enum Severity: String, Codable, CaseIterable, Hashable {
         }
     }
 
-    /// Short marker used on the move list; always paired with text, never colour alone (§11).
-    var marker: String {
-        switch self {
-        case .inaccuracy: return "?!"
-        case .mistake: return "?"
-        case .blunder: return "??"
-        }
-    }
-
     var sortOrder: Int {
         switch self {
         case .blunder: return 0
         case .mistake: return 1
         case .inaccuracy: return 2
+        }
+    }
+}
+
+/// The star a deep review gives a move (`MoveStar`): the engine's own choice, any other move
+/// under the inaccuracy line, or one of the three errors. Book moves get none.
+enum MoveGrade: Hashable {
+    case best
+    case good
+    case inaccuracy
+    case mistake
+    case blunder
+
+    init(severity: Severity?, isBest: Bool) {
+        switch severity {
+        case .inaccuracy: self = .inaccuracy
+        case .mistake: self = .mistake
+        case .blunder: self = .blunder
+        case nil: self = isBest ? .best : .good
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .best: return "Best move"
+        case .good: return "Good move"
+        case .inaccuracy: return "Inaccuracy"
+        case .mistake: return "Mistake"
+        case .blunder: return "Blunder"
         }
     }
 }

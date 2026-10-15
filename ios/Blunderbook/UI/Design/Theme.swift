@@ -53,12 +53,11 @@ enum Palette {
     static let loss = fixed(0xFF8A7A)
     static let improved = fixed(0x7ED9A0)
     static let declined = fixed(0xFF6B5E)
-    static let inaccuracy = fixed(0xE8CF6A)
-    static let mistake = fixed(0xF59E5B)
-    static let blunder = fixed(0xFF6B5E)
+    /// The three errors match their stars (`MoveStar`): gold, light red, red.
+    static let inaccuracy = fixed(0xFFD60A)
+    static let mistake = fixed(0xFF7B6B)
+    static let blunder = fixed(0xFF453A)
     static let best = fixed(0x7ED9A0)
-    /// Known opening theory: a book move.
-    static let book = fixed(0xC9A27A)
 }
 
 extension Severity {

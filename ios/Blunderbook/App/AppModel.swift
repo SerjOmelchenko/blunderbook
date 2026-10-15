@@ -94,7 +94,7 @@ final class AppModel {
     // MARK: - Boot
 
     init() {
-        // Read the opening book off the main thread, before the first game review needs it.
+        // Read the opening book off the main thread, before the first game screen needs it.
         Task.detached(priority: .utility) { _ = OpeningBook.shared }
         let directory = AppModel.databaseDirectory()
         let path = directory.appendingPathComponent("chessanalyser.sqlite").path

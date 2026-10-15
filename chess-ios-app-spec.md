@@ -99,8 +99,8 @@ Settings → Review depth, and a new choice applies to reviews run after it:
 
 | Level | Nodes per position | Plan |
 |---|---|---|
-| Quick | 500,000 | Free |
-| Standard (default) | 1,500,000 | Free |
+| Quick (default) | 500,000 | Free |
+| Standard | 1,500,000 | Free |
 | Deep | 3,000,000 | Premium |
 | Deepest | 6,000,000 | Premium |
 
@@ -115,7 +115,9 @@ the same way, so the error was never re-searched; on one rapid game that left 13
 15.Qc4 and 52.b5 unlabelled. Measured on 9 real games against 8M-node searches, which found 158
 errors: the old method found 122 (89 with the same severity), 500k on every position 136 (100), 1.5M
 141 (113), 2M 144 (122). Reviews made before keep their labels and their stored `confirmed` flags;
-levels saved as "fast" or "balanced" fall back to Standard.
+levels saved as "fast" or "balanced" fall back to the default. Changed 2026-10-15: the default is
+Quick (was Standard), about 3× faster for 5 fewer errors found and 13 fewer with the same severity
+on those 9 games; a level the person picked stays as it is.
 
 #### Accuracy (scoring winpct-2026)
 

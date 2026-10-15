@@ -32,7 +32,7 @@ final class PlanTests: XCTestCase {
         let budgets = ReviewDepth.allCases.map(\.nodesPerPosition)
         XCTAssertEqual(budgets, budgets.sorted())
         XCTAssertEqual(Set(budgets).count, budgets.count)
-        XCTAssertEqual(ReviewDepth.default, .standard)
+        XCTAssertEqual(ReviewDepth.default, .quick)
         XCTAssertEqual(ReviewDepth.standard.nodesPerPosition, 1_500_000, "about what Lichess gives a position")
     }
 

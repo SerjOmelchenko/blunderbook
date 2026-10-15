@@ -96,8 +96,9 @@ enum ReviewDepth: String, CaseIterable, Identifiable, Sendable {
     case deep
     case deepest
 
-    /// About what Lichess gives every position of a game it analyses.
-    static let `default` = ReviewDepth.standard
+    /// Changed 2026-10-15 from Standard: about 3× faster, and on the 9 games above it found 136 of
+    /// the 158 errors against Standard's 141 (100 with the same severity against 113).
+    static let `default` = ReviewDepth.quick
     /// The deepest level the free plan runs.
     static let deepestFree = ReviewDepth.standard
 

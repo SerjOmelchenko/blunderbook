@@ -85,7 +85,7 @@ re-import everything.
 | Chess rules | Complete. Passes perft to depth 5 on six standard positions, full SAN in and out, PGN with comments, variations, NAGs and `SetUp`/`FEN`. |
 | Engine | Stockfish 19, vendored and compiled in-process. The only source of analysis. |
 | Analysis | Every position is searched once at 100,000 nodes (policy `eval-v1`) and the evaluation stored as given. A game you open is analysed in depth (`deep-v1`): every position at the review depth set in Settings, every move scored, with accuracy, phase, patterns and the best move. |
-| Review depth | Quick 500k · Standard 1.5M (default, about what Lichess gives) · Deep 3M · Deepest 6M nodes per position. Deep and Deepest come with Premium. |
+| Review depth | Quick 500k (default) · Standard 1.5M (about what Lichess gives) · Deep 3M · Deepest 6M nodes per position. Deep and Deepest come with Premium. |
 | Accuracy | Lichess's published method, the same for Chess.com and Lichess games. Three rings: this game, the last 30 days, the last 12 months. |
 | Mistakes | Errors from in-depth reviews in one list, the biggest leak, opening hot spots, and a drill that asks for the better move (Premium). |
 | Persistence | SQLite via `sqlite3` behind typed repositories, WAL, foreign keys, versioned transactional migrations, 50-row paging. |
